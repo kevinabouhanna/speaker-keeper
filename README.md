@@ -44,7 +44,7 @@ You hear nothing. Your speaker just stays awake.
 
 It sits in your system tray and stays out of the way:
 
-|                             |                                                                                                      |
+| Useful Features             |                                                                                                      |
 | --------------------------- | ---------------------------------------------------------------------------------------------------- |
 | 🔋 **Shows your battery**   | One click on the tray icon shows your speaker's charge, and it warns you when it runs low.           |
 | 🎧 **Leaves earbuds alone** | Only works on Bluetooth _speakers_. It won't hold your earbuds awake and drain them.                 |
