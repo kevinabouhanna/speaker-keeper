@@ -1,0 +1,83 @@
+name: Something isn't working
+description: The speaker still falls asleep, the app won't start, or something else is wrong.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this.
+
+        You don't need to know anything technical to file a good report. The most
+        useful thing by far is the log — there's a button for it, and the steps are
+        below.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: In your own words. "I pressed play and the first second was still cut off" is a perfectly good bug report.
+      placeholder: What you did, and what the speaker or the app did instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect instead?
+      placeholder: Optional — skip this if it's obvious from the above.
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: Speaker Keeper version
+      description: Click the tray icon, then the cog, then **About**. It's the line under the app name.
+      placeholder: "1.3.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: windows
+    attributes:
+      label: Windows version
+      options:
+        - Windows 11
+        - Windows 10
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: speaker
+    attributes:
+      label: Which speaker?
+      description: Make and model, if you know it. Some speakers behave differently from others.
+      placeholder: "JBL Flip 6"
+    validations:
+      required: false
+
+  - type: textarea
+    id: log
+    attributes:
+      label: The log
+      description: |
+        This is the single most useful thing you can attach — it records what the app
+        was doing at the time.
+
+        Click the tray icon → the cog → **About** → **View log** → **Open in Notepad**,
+        then copy the last 30 or so lines and paste them here. (The log contains device
+        names and timestamps only. No personal data, nothing about what you listened to.)
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you post
+      options:
+        - label: I checked the [FAQ](https://speakerkeeper.github.io/#faq) and existing issues.
+          required: true
+        - label: I agree to follow this project's [Code of Conduct](https://github.com/kevinabouhanna/speaker-keeper/blob/main/CODE_OF_CONDUCT.md).
+          required: true

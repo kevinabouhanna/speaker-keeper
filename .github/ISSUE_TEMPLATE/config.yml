@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and common problems
+    url: https://speakerkeeper.github.io/#faq
+    about: Most questions are answered here — silence, battery, earbuds, updates, uninstalling.
+  - name: How it actually works
+    url: https://github.com/kevinabouhanna/speaker-keeper/blob/main/docs/TECHNICAL.md
+    about: The engineering write-up, if you want to know what it does under the hood.
+  - name: Report a security problem
+    url: https://github.com/kevinabouhanna/speaker-keeper/security/policy
+    about: Please do not open a public issue for anything security-related.

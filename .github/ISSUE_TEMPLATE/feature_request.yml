@@ -1,0 +1,37 @@
+name: Suggest something
+description: An idea for how Speaker Keeper could work better.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Speaker Keeper deliberately does one thing, so the bar for adding to it is
+        high — but a good description of the problem is always welcome, even if the
+        answer turns out to be no.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What's the problem?
+      description: Describe the situation you're in, rather than the feature you have in mind. It often has a simpler answer than expected.
+      placeholder: "When I ___, Speaker Keeper ___, and I'd rather it ___."
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What did you have in mind?
+      placeholder: Optional.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you post
+      options:
+        - label: I checked the existing issues for the same idea.
+          required: true
+        - label: I agree to follow this project's [Code of Conduct](https://github.com/kevinabouhanna/speaker-keeper/blob/main/CODE_OF_CONDUCT.md).
+          required: true

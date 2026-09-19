@@ -12,7 +12,7 @@
 
 **[speakerkeeper.github.io](https://speakerkeeper.github.io)**
 
-[Download](#install) · [Why you need it](#the-problem) · [FAQ](#faq)
+[Download](#install) · [Why you need it](#the-problem) · [FAQ](https://speakerkeeper.github.io/#faq)
 
 </div>
 
@@ -37,8 +37,8 @@ that you want to behave like it's simply always on.
 
 ## What Speaker Keeper does
 
-Speaker Keeper quietly plays **silence** to your speaker, so the speaker always thinks
-something is playing and never nods off.
+Speaker Keeper holds a silent audio stream open on your speaker, so it never sees the
+gap in playback that makes it shut down.
 
 You hear nothing. Your speaker just stays awake.
 
@@ -46,12 +46,12 @@ It sits in your system tray and stays out of the way:
 
 | | |
 |---|---|
-| 🔇 **Truly silent** | It plays digital silence, not a faint hum or a tone. Nothing comes out of the speaker. |
-| 🔋 **Shows your battery** | Hover the tray icon to see your speaker's charge, and get a warning when it runs low. |
+| 🔇 **Truly silent** | Digital silence, not a faint hum or a tone. Nothing comes out of the speaker. |
+| 🔋 **Shows your battery** | One click on the tray icon shows your speaker's charge, and it warns you when it runs low. |
 | 🎧 **Leaves earbuds alone** | Only works on Bluetooth *speakers*. It won't hold your earbuds awake and drain them. |
 | 👻 **Windows never sees it** | No card in the media flyout, no row in the volume mixer, no hijacked media keys. |
 | 🔀 **Follows your speaker** | Switch audio output and it follows along automatically. |
-| 🪶 **Tiny** | A single small app. No account, no background service, no telemetry. |
+| 🪶 **Tiny** | A single small app that follows your Windows theme. No account, no background service, no telemetry. |
 
 ## Install
 
@@ -85,38 +85,6 @@ show hidden icons — drag it out to pin it).
 - **The power button** next to it quits, letting your speaker go back to sleeping normally.
   It's on the right-click menu too.
 
-## FAQ
-
-**Will I hear anything?**
-No. It's true digital silence — every sample is a zero. Your volume slider makes no
-difference because there's no sound to make louder.
-
-**Will this drain my speaker's battery?**
-Your speaker stays on instead of sleeping, so yes — it uses power the way it does when
-you're actually listening. That's the trade. Speaker Keeper warns you when the battery
-gets low, and you can quit it any time.
-
-**Will it mess with my music controls?**
-No. Your keyboard's play/pause and skip buttons keep controlling your actual music apps.
-
-**Does it work with my earbuds / headphones?**
-It deliberately ignores them. Earbuds *should* power off when you're not using them, and
-holding them awake would just flatten them in your ears.
-
-**Does it work on Bluetooth speakers from any brand?**
-Yes. It works at the Windows audio level, so the brand doesn't matter. The battery
-readout depends on whether your speaker reports it to Windows — many do, some don't.
-
-**How do I get new versions?**
-Open Settings and tick **Install updates automatically**. Windows asks for permission
-once, then it quietly checks for a new version each night and installs it in the
-background. It's **off unless you turn it on** — otherwise Speaker Keeper never touches
-the internet at all.
-
-**Does it send my data anywhere?**
-No. There's no account, no analytics and no tracking of any kind. The only network
-request it ever makes is the update check, and only if you switch it on.
-
 ## Requirements
 
 - Windows 10 or Windows 11
@@ -148,9 +116,16 @@ Publishing a new version is documented in **[docs/RELEASING.md](docs/RELEASING.m
 
 ## Contributing
 
-Issues and pull requests are welcome. If you're reporting a bug, the log at
-`%LocalAppData%\Speaker Keeper\SpeakerKeeper.log` says what the app was doing at the time
-and is the single most useful thing you can attach.
+Issues and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md), and the
+[Code of Conduct](CODE_OF_CONDUCT.md) that goes with them.
+
+If you're reporting a bug, the log at `%LocalAppData%\Speaker Keeper\SpeakerKeeper.log`
+says what the app was doing at the time and is the single most useful thing you can
+attach. The **About** page in Settings has a button for it.
+
+Found a security problem? Please read [SECURITY.md](SECURITY.md) and report it privately
+rather than opening an issue. It matters more than it looks here: with automatic updates
+switched on, this repository decides what runs as `SYSTEM` on other people's machines.
 
 ## License
 
