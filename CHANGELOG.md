@@ -19,11 +19,20 @@ Added / Changed / Fixed / Removed / Security
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [1.2.1] - 2026-09-19
+
 ### Changed
 
 - **The icon is now blue instead of purple.** Speaker Keeper is a Bluetooth app, so it
   may as well look like one. The tray icon, the shortcut, the installer and the Settings
   window all pick the new one up. Nothing about how it behaves has changed.
+
+### Fixed
+
+- Git was rewriting line endings inside the icon and logo files, corrupting them. Added
+  `.gitattributes` so image files are treated as binary.
 
 ## [1.2.0] - 2026-09-19
 
@@ -90,7 +99,8 @@ First public release.
 - Follows the default output device when you switch speakers.
 - Per-speaker on/off, a live log viewer, start-with-Windows, and opt-in auto-updates.
 
-[Unreleased]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/kevinabouhanna/speaker-keeper/releases/tag/v1.2.1
 [1.2.0]: https://github.com/kevinabouhanna/speaker-keeper/releases/tag/v1.2.0
 [1.1.0]: https://github.com/kevinabouhanna/speaker-keeper/releases/tag/v1.1.0
 [1.0.0]: https://github.com/kevinabouhanna/speaker-keeper/releases/tag/v1.0.0
