@@ -1,0 +1,8 @@
+# Build output — binaries ship as GitHub release assets, not in the tree
+*.exe
+*.exe.old
+*.pdb
+
+# Logs
+*.log
+*.log.old
