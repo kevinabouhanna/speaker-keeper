@@ -261,14 +261,8 @@ static class SetupActions
         }
     }
 
-    public static string Version
-    {
-        get
-        {
-            var v = Assembly.GetExecutingAssembly().GetName().Version;
-            return v.Major + "." + v.Minor + "." + v.Build;
-        }
-    }
+    /// <summary>Shared with the app so the installer and the tray never disagree.</summary>
+    public static string Version { get { return Project.ShortVersion; } }
 
     /// <summary>
     /// Creates the Start Menu shortcut through WScript.Shell by late binding, which

@@ -6,3 +6,6 @@
 # Logs
 *.log
 *.log.old
+
+# Private working notes for Claude - not part of the project
+CLAUDE.md

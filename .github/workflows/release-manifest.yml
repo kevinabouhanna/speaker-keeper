@@ -1,9 +1,12 @@
-# Regenerates manifest.json from a published release's own assets.
+# Verifies a published release, then regenerates manifest.json from its own assets.
 #
 # The auto-updater aborts if a declared SHA-256 doesn't match what it downloads, so a
 # hand-edited manifest with a stale hash silently breaks updates for every installed
 # copy. This hashes the real assets instead, which makes that class of mistake
 # impossible: the manifest can only ever describe files that were actually published.
+#
+# It also refuses to publish a manifest that would put clients into a reinstall loop -
+# see the "Verify" step for why that is the most dangerous mistake available here.
 #
 # Trigger: publishing a release. Run it manually against an existing tag with
 # "Run workflow" if a manifest ever needs rebuilding.
@@ -15,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing release tag to rebuild the manifest from (e.g. v1.1.0)"
+        description: "Existing release tag to rebuild the manifest from (e.g. v1.2.0)"
         required: true
 
 permissions:
@@ -29,24 +32,28 @@ jobs:
         with:
           ref: main
 
-      - name: Build manifest from release assets
+      - name: Install PE reader
+        run: pip install --quiet pefile
+
+      - name: Download release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
           set -euo pipefail
-          echo "Building manifest for $TAG"
+          echo "Release $TAG"
 
-          # Only these are swapped in place by update.ps1. silent.wav and the icon are
-          # static, and shipping them would make every update needlessly re-download 3.4 MB.
-          PAYLOAD="SpeakerKeeper.exe Uninstall.exe"
+          # Only these two are swapped in place by update.ps1, so only these belong in
+          # the manifest. silent.wav and the icon are static, and shipping them would
+          # make every update needlessly re-download 3.4 MB.
+          echo "SpeakerKeeper.exe Uninstall.exe" > payload.txt
 
           # A release fires "published" the moment it is created, which is normally
           # BEFORE its assets have finished uploading. Rather than let the manifest
           # depend on winning that race, wait for each asset to actually appear.
           mkdir -p dl
-          for name in $PAYLOAD; do
-            echo "  downloading $name"
+          for name in $(cat payload.txt) Install.exe; do
+            echo "  fetching $name"
             got=0
             for attempt in $(seq 1 10); do
               if gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
@@ -59,19 +66,111 @@ jobs:
               sleep 15
             done
             if [ "$got" -ne 1 ]; then
-              echo "::error::$name never appeared on release $TAG."
-              echo "::error::Attach it, then re-run via Actions -> Update release manifest -> Run workflow."
-              exit 1
+              # Install.exe is what humans download; it is not in the manifest, so a
+              # missing one is only fatal for releases that are meant to have it.
+              if [ "$name" = "Install.exe" ]; then
+                echo "::warning::Install.exe is not attached to $TAG - users have nothing to download."
+              else
+                echo "::error::$name never appeared on release $TAG."
+                echo "::error::Attach it, then re-run via Actions -> Update release manifest -> Run workflow."
+                exit 1
+              fi
             fi
           done
 
+      - name: Verify the release is internally consistent
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          python3 - "$TAG" <<'PY'
+          import sys, os, pathlib
+          import pefile
+
+          tag = sys.argv[1]
+          version = tag.lstrip("v")
+          failures = []
+
+          def file_version(path):
+              pe = pefile.PE(str(path), fast_load=True)
+              pe.parse_data_directories(
+                  directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_RESOURCE"]])
+              fi = pe.VS_FIXEDFILEINFO[0]
+              ms, ls = fi.FileVersionMS, fi.FileVersionLS
+              return f"{ms >> 16}.{ms & 0xFFFF}.{ls >> 16}.{ls & 0xFFFF}"
+
+          # --- 1. the tag must match the version stamped into the binaries ---------
+          #
+          # This is the one that silently ruins every install. update.ps1 decides whether
+          # to update by comparing the manifest version against the INSTALLED exe's
+          # FileVersion. If the manifest says 1.2.0 but the binary is still stamped
+          # 1.1.0, then after installing, the local version is still 1.1.0 - so the very
+          # next nightly run sees 1.2.0 as newer and installs it again. And again. Every
+          # night, on every machine, forever, and nothing surfaces it to the user.
+          print(f"Expecting version {version} from tag {tag}")
+          for exe in sorted(pathlib.Path("dl").glob("*.exe")):
+              fv = file_version(exe)
+              short = ".".join(fv.split(".")[:3])
+              if short != version:
+                  failures.append(
+                      f"{exe.name} is stamped {fv} but the tag says {version}. "
+                      f"Bump AssemblyVersion and the .manifest files, rebuild, and re-upload.")
+              else:
+                  print(f"  ok   {exe.name:20} {fv}")
+
+          # --- 2. Install.exe must carry exactly these binaries --------------------
+          #
+          # Install.exe embeds copies of the other two as resources. If it was built
+          # before the last change to them it would install stale binaries, while the
+          # release assets and the manifest describe the new ones.
+          installer = pathlib.Path("dl/Install.exe")
+          if installer.exists():
+              blob = installer.read_bytes()
+              for name in ("SpeakerKeeper.exe", "Uninstall.exe"):
+                  p = pathlib.Path("dl") / name
+                  if not p.exists():
+                      continue
+                  if p.read_bytes() in blob:
+                      print(f"  ok   Install.exe embeds the published {name}")
+                  else:
+                      failures.append(
+                          f"Install.exe does not embed the published {name} - it was built "
+                          f"from a different copy. Rebuild Install.exe and re-upload it.")
+
+          # --- 3. the release must be documented -----------------------------------
+          #
+          # Updates are silent, so a release with no changelog entry is one nobody can
+          # find out about after the fact.
+          changelog = pathlib.Path("CHANGELOG.md")
+          if not changelog.exists():
+              failures.append("CHANGELOG.md is missing.")
+          elif f"## [{version}]" not in changelog.read_text(encoding="utf-8"):
+              failures.append(
+                  f"CHANGELOG.md has no '## [{version}]' entry. Users are updated silently; "
+                  f"the changelog is the only place they can see what changed.")
+          else:
+              print(f"  ok   CHANGELOG.md documents {version}")
+
+          if failures:
+              print()
+              for f in failures:
+                  print(f"::error::{f}")
+              sys.exit(1)
+          print("\nRelease is consistent.")
+          PY
+
+      - name: Build manifest from release assets
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
           VERSION="${TAG#v}"
           {
             echo '{'
             echo "  \"version\": \"$VERSION\","
             echo '  "files": ['
             first=1
-            for name in $PAYLOAD; do
+            for name in $(cat payload.txt); do
               sha=$(sha256sum "dl/$name" | cut -d' ' -f1 | tr '[:lower:]' '[:upper:]')
               url="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$name"
               [ $first -eq 1 ] || echo '    },'

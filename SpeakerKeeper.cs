@@ -24,8 +24,8 @@ using Windows.Media.Playback;
 [assembly: AssemblyDescription("Keeps a Bluetooth speaker awake with a silent media session")]
 [assembly: AssemblyCompany("Kevin Abou Hanna")]
 [assembly: AssemblyCopyright("Copyright (c) Kevin Abou Hanna")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.2.0.0")]
+[assembly: AssemblyFileVersion("1.2.0.0")]
 
 [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
 class MMDeviceEnumeratorClass { }
@@ -296,6 +296,51 @@ static class DeviceProps
 }
 
 /// <summary>
+/// Where this build came from, and how to point a user at what changed.
+///
+/// Auto-updates are silent by design - a SYSTEM task swaps the binaries overnight and
+/// nobody is prompted. That is only tolerable if the user can find out afterwards what
+/// landed on their machine, so the version and these links are surfaced in Settings and
+/// in the post-update notification.
+/// </summary>
+static class Project
+{
+    public const string Repo = "https://github.com/kevinabouhanna/speaker-keeper";
+    public const string ChangelogUrl = Repo + "/blob/main/CHANGELOG.md";
+
+    /// <summary>"1.2.0" - the three-part form used for tags and in the changelog.</summary>
+    public static string ShortVersion
+    {
+        get
+        {
+            var v = Assembly.GetExecutingAssembly().GetName().Version;
+            return v.Major + "." + v.Minor + "." + v.Build;
+        }
+    }
+
+    /// <summary>
+    /// Release notes for a version. Falls back to the changelog when no version is
+    /// known, which is what a locally-built exe would hit before its tag exists.
+    /// </summary>
+    public static string ReleaseNotesUrl(string version)
+    {
+        if (string.IsNullOrEmpty(version)) return ChangelogUrl;
+        return Repo + "/releases/tag/v" + version;
+    }
+
+    public static void Open(string url)
+    {
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo(url);
+            psi.UseShellExecute = true;
+            System.Diagnostics.Process.Start(psi);
+        }
+        catch { }
+    }
+}
+
+/// <summary>
 /// Preferences, kept in HKCU so they survive the folder being moved and so the app
 /// works the same if it is ever installed somewhere non-writable.
 /// </summary>
@@ -334,6 +379,22 @@ static class Settings
     {
         get { return Read("WarnLowBattery", 1) != 0; }
         set { Write("WarnLowBattery", value ? 1 : 0); }
+    }
+
+    /// <summary>
+    /// The version that last ran for this user, so a silent auto-update can be told
+    /// apart from an ordinary launch.
+    ///
+    /// Per-user rather than machine-wide on purpose: the update is machine-wide, but
+    /// the *notice* is per-person, so each account that signs in gets told once rather
+    /// than only whoever happened to log in first.
+    ///
+    /// Empty on a first-ever run, which is deliberately NOT treated as an update.
+    /// </summary>
+    public static string LastRunVersion
+    {
+        get { return Read("LastRunVersion", ""); }
+        set { Write("LastRunVersion", value); }
     }
 
     public static int LowBatteryThreshold
@@ -1081,6 +1142,25 @@ class SettingsForm : Form
         AcceptButton = close;
         CancelButton = close;
 
+        // Version footer. Auto-updates are silent, so this is the one place a user can
+        // always find out which build they are actually running and what went into it -
+        // a toast can be missed or suppressed, this cannot.
+        y += 40;
+
+        var ver = new Label();
+        ver.Text = "Version " + Project.ShortVersion;
+        ver.Location = new Point(16, y);
+        ver.AutoSize = true;
+        ver.ForeColor = SystemColors.GrayText;
+        Controls.Add(ver);
+
+        var whatsNew = new LinkLabel();
+        whatsNew.Text = "What's new";
+        whatsNew.Location = new Point(16 + ver.PreferredWidth + 12, y);
+        whatsNew.AutoSize = true;
+        whatsNew.LinkClicked += (s, e) => Project.Open(Project.ReleaseNotesUrl(Project.ShortVersion));
+        Controls.Add(whatsNew);
+
         ReloadFromSettings();
     }
 
@@ -1316,6 +1396,15 @@ static class Program
     static int _lastBattery = -1;
 
     static string _idleReason;
+
+    // Set when this launch found a different version than the user last ran, i.e. a
+    // silent auto-update happened underneath them.
+    static string _updatedFrom;
+
+    // What clicking the current balloon should do. Balloons are reused for different
+    // messages, so the action is swapped per balloon rather than leaving handlers
+    // attached - otherwise clicking a low-battery toast would open release notes.
+    static Action _balloonClick;
 
     // Windows exposes no charging flag for Bluetooth audio devices.
     //
@@ -1602,6 +1691,17 @@ static class Program
         _tray.ContextMenuStrip = _menu;
         _tray.Visible = true;
 
+        // One handler for every balloon; the action is whatever the balloon that is
+        // currently showing set. Cleared on click and on close so a dismissed balloon
+        // can't leave a stale action armed for the next, unrelated one.
+        _tray.BalloonTipClicked += (s, e) =>
+        {
+            var act = _balloonClick;
+            _balloonClick = null;
+            if (act != null) act();
+        };
+        _tray.BalloonTipClosed += (s, e) => { _balloonClick = null; };
+
         // Windows convention: double-clicking a tray icon opens the app's own window,
         // while right-click gets the menu. Right-click is already handled by assigning
         // ContextMenuStrip above.
@@ -1617,6 +1717,70 @@ static class Program
 
         RefreshMenu();
         Log("tray ready - " + _deviceItem.Text + ", " + _batteryItem.Text);
+
+        // Only once the tray icon exists - a balloon with no icon to anchor to is
+        // silently dropped by the shell.
+        if (_updatedFrom != null) ShowUpdatedNotice();
+    }
+
+    /// <summary>
+    /// Tells the user that the app changed under them, and offers the release notes.
+    ///
+    /// If notifications are turned off system-wide the shell drops this silently, which
+    /// is why the same information is also shown permanently in Settings.
+    /// </summary>
+    static void ShowUpdatedNotice()
+    {
+        try
+        {
+            string now = Project.ShortVersion;
+            _balloonClick = () => Project.Open(Project.ReleaseNotesUrl(now));
+            _tray.ShowBalloonTip(
+                10000,
+                "Speaker Keeper updated",
+                "Now version " + now + ", up from " + _updatedFrom + ". Click to see what changed.",
+                ToolTipIcon.Info);
+        }
+        catch (Exception ex) { Log("update notice failed: " + ex.Message); }
+    }
+
+    /// <summary>
+    /// Notices that the binaries changed since this user last ran the app.
+    ///
+    /// Auto-updates are installed by a SYSTEM task overnight with no prompt and no UI,
+    /// so without this the app just silently becomes a different program. Recording the
+    /// version per user and comparing on launch is enough to say so once.
+    ///
+    /// Deliberately does NOT claim an update when:
+    ///  - this is the first run for this user - nothing to compare against
+    ///  - the version is unchanged - an ordinary relaunch
+    ///  - the version went BACKWARDS - a downgrade or an older build being reinstalled.
+    ///    Calling that an update would be a lie, so it is only logged.
+    /// </summary>
+    static void DetectVersionChange()
+    {
+        try
+        {
+            string now = Project.ShortVersion;
+            string before = Settings.LastRunVersion;
+
+            // Recorded unconditionally, so a skipped notice never repeats on every launch.
+            Settings.LastRunVersion = now;
+
+            if (string.IsNullOrEmpty(before)) { Log("first run for this user, v" + now); return; }
+            if (string.Equals(before, now, StringComparison.Ordinal)) return;
+
+            Version a, b;
+            if (Version.TryParse(before, out a) && Version.TryParse(now, out b) && b < a)
+            {
+                Log("version went backwards: " + before + " -> " + now + " (not reporting as an update)");
+                return;
+            }
+
+            _updatedFrom = before;
+            Log("updated since last run: " + before + " -> " + now);
+        }
+        catch (Exception ex) { Log("version check failed: " + ex.Message); }
     }
 
     static void ShowSettings()
@@ -1744,6 +1908,7 @@ static class Program
             // A NotifyIcon balloon is rendered by the Windows 10/11 shell as a real
             // system toast, so this honours Do Not Disturb and the user's per-app
             // notification settings rather than drawing anything custom.
+            _balloonClick = null;       // this one isn't clickable; don't inherit the last action
             _tray.ShowBalloonTip(
                 10000,
                 "Speaker battery low",
@@ -1784,6 +1949,7 @@ static class Program
             + ", pid " + System.Diagnostics.Process.GetCurrentProcess().Id
             + ", exe " + Application.ExecutablePath);
         Settings.RepairRunPath();
+        DetectVersionChange();
 
         // Sleep/resume is when a keep-alive most often breaks: the Bluetooth link drops
         // and the media session can come back dead. Logging both edges makes it obvious
