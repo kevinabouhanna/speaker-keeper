@@ -47,6 +47,12 @@ contents of `manifest.json` change when you ship. Installed copies check it dail
    which downloads those assets, hashes them, rewrites `manifest.json` and commits it
    to `main`.
 
+> **Attach the assets before publishing**, or create the release as a draft and publish
+> it once they are up. GitHub fires the `published` event the instant a release is
+> created, which is usually before its uploads finish. The workflow waits up to 2.5
+> minutes for each asset to appear, so a normal upload is fine, but a slow connection
+> can still outlast it - in which case just re-run the workflow.
+
 > Don't hand-edit `manifest.json`. A hash that doesn't match the published binary makes
 > every client abort its update — and it fails silently, in a 03:00 scheduled task, on
 > other people's machines. The workflow hashes the real assets so that can't happen.

@@ -41,11 +41,28 @@ jobs:
           # static, and shipping them would make every update needlessly re-download 3.4 MB.
           PAYLOAD="SpeakerKeeper.exe Uninstall.exe"
 
+          # A release fires "published" the moment it is created, which is normally
+          # BEFORE its assets have finished uploading. Rather than let the manifest
+          # depend on winning that race, wait for each asset to actually appear.
           mkdir -p dl
           for name in $PAYLOAD; do
             echo "  downloading $name"
-            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
-               --pattern "$name" --dir dl --clobber
+            got=0
+            for attempt in $(seq 1 10); do
+              if gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+                   --pattern "$name" --dir dl --clobber 2>/dev/null; then
+                echo "    got it on attempt $attempt"
+                got=1
+                break
+              fi
+              echo "    not uploaded yet, waiting 15s (attempt $attempt/10)"
+              sleep 15
+            done
+            if [ "$got" -ne 1 ]; then
+              echo "::error::$name never appeared on release $TAG."
+              echo "::error::Attach it, then re-run via Actions -> Update release manifest -> Run workflow."
+              exit 1
+            fi
           done
 
           VERSION="${TAG#v}"
