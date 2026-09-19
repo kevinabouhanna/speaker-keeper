@@ -19,7 +19,14 @@ Added / Changed / Fixed / Removed / Security
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- **The battery threshold in Settings now says what it is.** The *Warn below* row was a
+  number with no icon and no explanation, sitting under the low-battery switch without
+  saying it belonged to it. It has a battery icon and a line telling you what the number
+  does.
+- **The project link on the About page uses the app's own speaker icon** rather than a
+  Bluetooth one, matching everywhere else that stands for Speaker Keeper itself.
 
 ## [1.3.1] - 2026-09-19
 

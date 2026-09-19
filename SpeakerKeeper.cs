@@ -1089,13 +1089,15 @@ static class Fluent
 
     // Segoe Fluent Icons ships with Windows 11; Windows 10 has the same glyphs under the
     // older name. Codepoints used across the app: gear E713, volume E767, bluetooth E702,
-    // power E7E8, download E896, warning E7BA, info E946, document E8A5, folder E8B7.
+    // power E7E8, download E896, warning E7BA, info E946, document E8A5, folder E8B7,
+    // battery E851 (the near-empty one of the E850..E85A ramp).
     public const string IconSettings = "";
     public const string IconVolume = "";
     public const string IconBluetooth = "";
     public const string IconPower = "";
     public const string IconDownload = "";
     public const string IconWarning = "";
+    public const string IconBattery = "";
     public const string IconInfo = "";
     public const string IconDocument = "";
     public const string IconFolder = "";
@@ -2338,7 +2340,8 @@ class SettingsForm : Form
             "Launches Speaker Keeper automatically when you sign in.", _runAtLogin));
         _general.Controls.Add(Card(Fluent.IconWarning, "Warn me when the battery is low",
             "Shows a notification once per discharge, not on every reading.", _warnLow));
-        _thresholdCard = Card("", "Warn below", null, _threshold);
+        _thresholdCard = Card(Fluent.IconBattery, "Warn below",
+            "You're told once when the speaker drops below this.", _threshold);
         _general.Controls.Add(_thresholdCard);
         _general.Controls.Add(Card(Fluent.IconDownload, "Install updates automatically",
             "Checks once a day and installs in the background. Needs administrator approval once, "
@@ -2366,7 +2369,7 @@ class SettingsForm : Form
         folderCard.SetAction(Button("Open folder", false, () => OpenPath(_dir)));
         _about.Controls.Add(folderCard);
 
-        var repoCard = Card(Fluent.IconBluetooth, "Project page",
+        var repoCard = Card(Fluent.IconVolume, "Project page",
             "Source, releases and how it works.", null);
         repoCard.SetAction(Button("Open on GitHub", false, () => Project.Open(Project.Repo)));
         _about.Controls.Add(repoCard);
