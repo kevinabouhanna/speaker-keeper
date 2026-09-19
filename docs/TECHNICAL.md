@@ -371,6 +371,12 @@ update after that is silent.
 | Feed | `HKLM\Software\SpeakerKeeper\UpdateUrl` — defaults to the repo manifest (see [RELEASING.md](RELEASING.md)) |
 | Log | `%ProgramData%\Speaker Keeper\update.log` |
 
+> **Checking whether the task exists needs an elevated shell.** It runs as `SYSTEM`,
+> and a standard-user `schtasks /Query` or `Get-ScheduledTask` reports it as missing
+> even when it is present and enabled. Query it elevated before concluding auto-update
+> is off. `HKLM\Software\SpeakerKeeper\AutoUpdate` is readable without elevation and is
+> the cheaper first check, though it only records intent - the task is the truth.
+
 The feed is hosted on GitHub at no cost: the binaries are release assets and the
 manifest is `manifest.json` on `main`, served raw. `install.ps1` defaults `UpdateUrl` to
 

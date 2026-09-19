@@ -1,0 +1,21 @@
+# core.autocrlf=true plus no rules here meant git treated the icon and the logo PNGs
+# as text and rewrote LF bytes inside them, corrupting the files on checkout. Anything
+# binary must say so explicitly.
+* text=auto
+
+*.ico   binary
+*.png   binary
+*.wav   binary
+*.exe   binary
+*.pdb   binary
+
+# Scripts Windows runs: keep CRLF so they behave the same however they are checked out.
+*.ps1   text eol=crlf
+*.cs    text eol=crlf
+*.manifest text eol=crlf
+
+# Everything the workflow runs on Linux must keep LF, or bash chokes on \r.
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
