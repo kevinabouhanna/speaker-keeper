@@ -25,6 +25,10 @@ Nothing yet.
 
 ### Added
 
+- **Setup can now turn on automatic updates**, ticked by default. Previously the only
+  way to enable them was in Settings, which needs a separate Windows permission prompt;
+  setup is already running with permission, so it costs nothing there. `Install.exe`
+  takes `/NOAUTOUPDATE` for managed deployments that patch on their own schedule.
 - The version you are running is now shown in Settings, with a **What's new** link to
   the release notes for that exact version.
 - A notification when an update has been installed, since updates land silently
@@ -40,6 +44,12 @@ Nothing yet.
 - The release workflow now refuses to publish a manifest whose version doesn't match the
   version stamped into the binaries. Getting that wrong made every installed copy
   reinstall the same build nightly, forever, and nothing caught it before.
+
+### Fixed
+
+- Turning on *Install updates automatically* in Settings and then dismissing the Windows
+  permission prompt used to reset the checkbox with no explanation, which looked exactly
+  like the setting refusing to stick. It now says what happened and why nothing changed.
 
 ## [1.1.0] - 2026-09-19
 

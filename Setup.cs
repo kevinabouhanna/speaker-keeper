@@ -31,6 +31,7 @@ static class SetupProgram
         // /S is the long-standing convention for a silent install (NSIS, Inno and
         // friends all take it); --quiet mirrors what Uninstall.exe already accepts.
         bool silent = false;
+        bool autoUpdate = true;     // same default the wizard offers
         string target = SetupActions.DefaultTarget;
         for (int i = 0; i < args.Length; i++)
         {
@@ -39,13 +40,24 @@ static class SetupProgram
                 string.Equals(a, "--quiet", StringComparison.OrdinalIgnoreCase)) silent = true;
             if (string.Equals(a, "/D", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
                 target = args[i + 1];
+            // For managed deployments that patch on their own schedule and do not want a
+            // SYSTEM task reaching the internet nightly.
+            if (string.Equals(a, "/NOAUTOUPDATE", StringComparison.OrdinalIgnoreCase))
+                autoUpdate = false;
         }
 
         if (silent)
         {
             try
             {
-                SetupActions.Install(target, true, true, delegate { });
+                string warning = SetupActions.Install(target, true, true, autoUpdate, delegate { });
+                if (warning != null)
+                {
+                    // Installed, but not entirely as asked. Say so on stderr and use a
+                    // distinct exit code so a deployment script can tell the difference.
+                    Console.Error.WriteLine(warning);
+                    Environment.Exit(2);
+                }
                 Environment.Exit(0);
             }
             catch (Exception ex)
@@ -176,8 +188,14 @@ static class SetupActions
         }
     }
 
-    public static void Install(string target, bool autostart, bool shortcut, Action<string> report)
+    /// <summary>
+    /// Returns null on a clean install, or a message describing something that did not
+    /// work but did not stop the install - see the auto-update branch below.
+    /// </summary>
+    public static string Install(string target, bool autostart, bool shortcut, bool autoUpdate,
+                                 Action<string> report)
     {
+        string warning = null;
         report("Closing any running copy...");
         StopRunning();
 
@@ -192,10 +210,29 @@ static class SetupActions
         report("Registering with Windows...");
         RegisterUninstall(target, exe, uninst);
 
-        // The update feed. The auto-update task itself is deliberately NOT created here:
-        // it runs as SYSTEM, so it stays opt-in from Settings, which raises its own prompt.
+        // The update feed. Written whether or not auto-update is on, so turning it on
+        // later from Settings has somewhere to point.
         using (var k = Registry.LocalMachine.CreateSubKey("Software" + (char)92 + "SpeakerKeeper"))
             if (k != null) k.SetValue("UpdateUrl", UpdateUrl);
+
+        if (autoUpdate)
+        {
+            report("Setting up automatic updates...");
+            // Setup is already elevated, so the SYSTEM task can be created without a
+            // second prompt. Told the target explicitly: this process runs from wherever
+            // Install.exe was saved, not from the install folder.
+            int rc = Updater.Apply(true, target);
+            if (rc != 0)
+            {
+                // Deliberately NOT fatal: the app is installed and works, it just won't
+                // update itself. Failing the whole install here would be a lie. But it
+                // must be said out loud - a silent no-op is how someone ends up believing
+                // updates are on for months when they never were.
+                warning = "Speaker Keeper is installed, but automatic updates could not be "
+                        + "switched on (error " + rc + "). You can turn them on from "
+                        + "Settings once the app is running.";
+            }
+        }
 
         if (shortcut)
         {
@@ -222,6 +259,7 @@ static class SetupActions
         CleanUpOldPerUserInstall(target);
 
         report("Done.");
+        return warning;
     }
 
     static void StopRunning()
@@ -343,7 +381,7 @@ class SetupWizard : Form
     readonly Panel _header;
     readonly Image _logo;
 
-    CheckBox _accept, _autostart, _shortcut, _launch;
+    CheckBox _accept, _autostart, _shortcut, _autoUpdate, _launch;
     TextBox _path;
     Label _spaceNote;
     ProgressBar _bar;
@@ -566,19 +604,31 @@ class SetupWizard : Form
         _shortcut.Text = "Add a Start Menu shortcut";
         _shortcut.AutoSize = true;
         _shortcut.Checked = true;
-        _shortcut.Location = new Point(0, 108);
+        _shortcut.Location = new Point(0, 100);
         p.Controls.Add(_shortcut);
 
         _autostart = new CheckBox();
         _autostart.Text = "Start Speaker Keeper when I sign in";
         _autostart.AutoSize = true;
         _autostart.Checked = true;
-        _autostart.Location = new Point(0, 136);
+        _autostart.Location = new Point(0, 124);
         p.Controls.Add(_autostart);
 
+        // Offered here because setup is already elevated: creating the SYSTEM update
+        // task costs nothing extra now, whereas turning it on later from Settings needs
+        // its own UAC prompt. That prompt is easy to dismiss, and dismissing it silently
+        // reverts the checkbox - so most people who meant to enable updates never did.
+        _autoUpdate = new CheckBox();
+        _autoUpdate.Text = "Install updates automatically";
+        _autoUpdate.AutoSize = true;
+        _autoUpdate.Checked = true;
+        _autoUpdate.Location = new Point(0, 148);
+        p.Controls.Add(_autoUpdate);
+
         var note = Para(
-            "Recommended - a speaker that only stays awake while you remember to launch "
-            + "an app is not much use. You can change this later from the tray menu.", 162, W);
+            "Checks once a day in the background. Speaker Keeper is not code-signed, so "
+            + "updates are verified by checksum over HTTPS. All three can be changed later "
+            + "from the tray menu and Settings.", 176, W);
         note.ForeColor = SystemColors.GrayText;
         p.Controls.Add(note);
 
@@ -713,6 +763,7 @@ class SetupWizard : Form
         }
 
         bool autostart = _autostart.Checked, shortcut = _shortcut.Checked;
+        bool autoUpdate = _autoUpdate.Checked;
         Go(PageProgress);
 
         // On a worker thread so the window keeps repainting; writing silent.wav alone is
@@ -720,15 +771,17 @@ class SetupWizard : Form
         var t = new Thread(delegate ()
         {
             int done = 0;
+            string warning = null;
             try
             {
-                SetupActions.Install(target, autostart, shortcut, delegate (string msg)
-                {
-                    done += 16;
-                    int d = Math.Min(done, 100);
-                    try { BeginInvoke((MethodInvoker)delegate { _step.Text = msg; _bar.Value = d; }); }
-                    catch { }
-                });
+                warning = SetupActions.Install(target, autostart, shortcut, autoUpdate,
+                    delegate (string msg)
+                    {
+                        done += 14;
+                        int d = Math.Min(done, 100);
+                        try { BeginInvoke((MethodInvoker)delegate { _step.Text = msg; _bar.Value = d; }); }
+                        catch { }
+                    });
             }
             catch (Exception ex) { _error = ex.Message; }
 
@@ -738,12 +791,13 @@ class SetupWizard : Form
                 {
                     _bar.Value = 100;
                     _installed = _error == null;
-                    _finishText.Text = _error == null
-                        ? "Speaker Keeper is in your system tray. Hover it to see your speaker "
-                          + "and its battery, right-click it for the menu, or double-click it to "
-                          + "open Settings.\r\n\r\n"
-                          + "Installed to:\r\n" + target
-                        : "Setup could not complete:\r\n\r\n" + _error;
+                    string ok = "Speaker Keeper is in your system tray. Hover it to see your "
+                              + "speaker and its battery, right-click it for the menu, or "
+                              + "double-click it to open Settings.\r\n\r\n"
+                              + "Installed to:\r\n" + target;
+                    // A warning means it IS installed, so it must not read as a failure.
+                    if (warning != null) ok = warning + "\r\n\r\nInstalled to:\r\n" + target;
+                    _finishText.Text = _error == null ? ok : "Setup could not complete:\r\n\r\n" + _error;
                     if (_error != null) _launch.Visible = false;
                     Go(PageFinish);
                 });

@@ -706,9 +706,22 @@ static class Updater
     /// <summary>Runs elevated, from --set-autoupdate. Creates or deletes the task.</summary>
     public static int Apply(bool enable)
     {
+        return Apply(enable, Path.GetDirectoryName(Application.ExecutablePath));
+    }
+
+    /// <summary>
+    /// Same, but told explicitly where the install lives.
+    ///
+    /// Setup needs this overload. It is already elevated so it can create the task
+    /// directly, but it runs from wherever the user saved Install.exe - not from the
+    /// install folder. Deriving the path from Application.ExecutablePath there would
+    /// point a SYSTEM task at an update.ps1 in the Downloads folder.
+    /// </summary>
+    public static int Apply(bool enable, string installDir)
+    {
         try
         {
-            string dir = Path.GetDirectoryName(Application.ExecutablePath);
+            string dir = installDir;
             string script = Path.Combine(dir, "update.ps1");
 
             if (enable)
@@ -1069,12 +1082,22 @@ class SettingsForm : Form
             if (_loading) return;
             bool want = _autoUpdate.Checked;
             // Machine-wide: creating the SYSTEM task raises one UAC prompt. If the user
-            // dismisses it, snap the checkbox back rather than lying about the state.
+            // dismisses it, snap the checkbox back rather than lying about the state -
+            // and say why. Silently reverting looks identical to the setting not
+            // sticking, which is how someone ends up believing updates are on when the
+            // task was never created.
             if (!Updater.SetAutoUpdateElevated(want))
             {
                 _loading = true;
                 _autoUpdate.Checked = !want;
                 _loading = false;
+                MessageBox.Show(this,
+                    (want ? "Automatic updates were not turned on."
+                          : "Automatic updates were not turned off.")
+                    + "\n\nChanging this installs or removes a scheduled task that runs as "
+                    + "the system account, so Windows has to ask for permission. The "
+                    + "permission prompt was dismissed or refused, so nothing was changed.",
+                    "Speaker Keeper", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
             ReloadFromSettings();
