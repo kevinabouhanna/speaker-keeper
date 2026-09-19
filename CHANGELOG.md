@@ -33,19 +33,19 @@ Nothing yet.
 ### Changed
 
 - **Speaker Keeper no longer shows up in Windows' own audio controls.** It used to
-  appear as a media card with play, pause, next and previous buttons — buttons for a
-  track that does not exist — and as a slider in the volume mixer. Pressing pause there
+  appear as a media card with play, pause, next and previous buttons (buttons for a
+  track that does not exist) and as a slider in the volume mixer. Pressing pause there
   actually stopped the keep-alive until the app noticed and restarted it. Both are gone:
   the app now feeds silence straight to the speaker instead of pretending to be a music
   player, so Windows has nothing to show.
 - **Settings has been rebuilt to look like Windows 11.** Grouped pages instead of one
   dialog of checkboxes, with a line under each setting explaining what it actually does.
 - **The whole app follows your Windows theme.** Light or dark, plus your accent colour,
-  across the panel, Settings, the log window and the installer — and it changes over the
+  across the panel, Settings, the log window and the installer. It changes over the
   moment you switch Windows, without being restarted.
 - **The installer looks like the rest of the app now,** rather than a grey dialog from
   2001. Same wording and the same steps; nothing about what it installs has changed.
-- **Double-clicking the tray icon no longer does anything special** — one click opens the
+- **Double-clicking the tray icon no longer does anything special.** One click opens the
   panel instead. The right-click menu is now just Settings and Quit, because everything
   it used to list is on the panel.
 
