@@ -19,6 +19,10 @@ Added / Changed / Fixed / Removed / Security
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [1.3.2] - 2026-09-20
+
 ### Changed
 
 - **The battery threshold in Settings now says what it is.** The *Warn below* row was a
@@ -153,7 +157,8 @@ First public release.
 - Follows the default output device when you switch speakers.
 - Per-speaker on/off, a live log viewer, start-with-Windows, and opt-in auto-updates.
 
-[Unreleased]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.3.1...HEAD
+[Unreleased]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.3.2...HEAD
+[1.3.2]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/kevinabouhanna/speaker-keeper/releases/tag/v1.2.1

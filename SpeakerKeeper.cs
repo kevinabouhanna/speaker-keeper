@@ -22,8 +22,8 @@ using System.Windows.Forms;
 [assembly: AssemblyDescription("Keeps a Bluetooth speaker awake with a silent audio stream")]
 [assembly: AssemblyCompany("Kevin Abou Hanna")]
 [assembly: AssemblyCopyright("Copyright (c) Kevin Abou Hanna")]
-[assembly: AssemblyVersion("1.3.1.0")]
-[assembly: AssemblyFileVersion("1.3.1.0")]
+[assembly: AssemblyVersion("1.3.2.0")]
+[assembly: AssemblyFileVersion("1.3.2.0")]
 
 [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
 class MMDeviceEnumeratorClass { }
