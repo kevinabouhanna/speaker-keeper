@@ -51,9 +51,10 @@ Nothing yet.
 
 ### Removed
 
-- **`silent.wav` is gone.** The app generates its silence as it goes, so the 3.4 MB file
-  the installer used to write is no longer needed. Existing installs have it cleaned up
-  automatically, whether they update in the background or you reinstall over the top.
+- **`silent.wav` is gone.** The app makes its own silence now, so the 3.4 MB file the
+  installer used to write is no longer needed. Running the installer again removes it.
+  A background update will not: those replace only the program itself, so a machine that
+  updated overnight keeps the stray file until it is reinstalled.
 
 ## [1.2.1] - 2026-09-19
 
