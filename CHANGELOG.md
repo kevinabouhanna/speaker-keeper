@@ -21,6 +21,40 @@ Added / Changed / Fixed / Removed / Security
 
 Nothing yet.
 
+## [1.3.0] - 2026-09-19
+
+### Added
+
+- **Click the tray icon once and a panel opens.** It shows which speaker you are on,
+  whether it is being held awake, and its battery, with a switch to turn Speaker Keeper
+  off for that speaker. It sits above the tray like the volume and brightness panels do,
+  and closes as soon as you click away.
+
+### Changed
+
+- **Speaker Keeper no longer shows up in Windows' own audio controls.** It used to
+  appear as a media card with play, pause, next and previous buttons — buttons for a
+  track that does not exist — and as a slider in the volume mixer. Pressing pause there
+  actually stopped the keep-alive until the app noticed and restarted it. Both are gone:
+  the app now feeds silence straight to the speaker instead of pretending to be a music
+  player, so Windows has nothing to show.
+- **Settings has been rebuilt to look like Windows 11.** Grouped pages instead of one
+  dialog of checkboxes, with a line under each setting explaining what it actually does.
+- **The whole app follows your Windows theme.** Light or dark, plus your accent colour,
+  across the panel, Settings, the log window and the installer — and it changes over the
+  moment you switch Windows, without being restarted.
+- **The installer looks like the rest of the app now,** rather than a grey dialog from
+  2001. Same wording and the same steps; nothing about what it installs has changed.
+- **Double-clicking the tray icon no longer does anything special** — one click opens the
+  panel instead. The right-click menu is now just Settings and Quit, because everything
+  it used to list is on the panel.
+
+### Removed
+
+- **`silent.wav` is gone.** The app generates its silence as it goes, so the 3.4 MB file
+  the installer used to write is no longer needed. Existing installs have it cleaned up
+  automatically, whether they update in the background or you reinstall over the top.
+
 ## [1.2.1] - 2026-09-19
 
 ### Changed
@@ -99,7 +133,8 @@ First public release.
 - Follows the default output device when you switch speakers.
 - Per-speaker on/off, a live log viewer, start-with-Windows, and opt-in auto-updates.
 
-[Unreleased]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.2.1...HEAD
+[Unreleased]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/kevinabouhanna/speaker-keeper/releases/tag/v1.2.1
 [1.2.0]: https://github.com/kevinabouhanna/speaker-keeper/releases/tag/v1.2.0
 [1.1.0]: https://github.com/kevinabouhanna/speaker-keeper/releases/tag/v1.1.0

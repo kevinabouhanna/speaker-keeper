@@ -115,30 +115,7 @@ foreach ($e in @("SpeakerKeeper.exe", "Uninstall.exe")) {
     else { Bad "embedded $e is STALE - Install.exe was built from an older $e; rebuild" }
 }
 
-# --- 5. silent.wav generation still matches the repo copy -----------------------
-# The installer generates this rather than shipping it. If generation ever drifts, the
-# app would loop a malformed file and hold no session at all.
-Write-Host "`nGenerated payload"
-$tmp = Join-Path ([IO.Path]::GetTempPath()) ("skverify_" + [Guid]::NewGuid().ToString("N"))
-New-Item -ItemType Directory -Force $tmp | Out-Null
-try {
-    $payloadType = $asm.GetType("Payload")
-    $m = $payloadType.GetMethod("WriteSilentWav",
-            [System.Reflection.BindingFlags]::Public -bor [System.Reflection.BindingFlags]::Static)
-    # [object[]] with an explicit [string]: reflection rejects a PSObject-wrapped arg.
-    $m.Invoke($null, [object[]]@([string]$tmp)) | Out-Null
-    $gen = (Get-FileHash (Join-Path $tmp "silent.wav") -Algorithm SHA256).Hash
-    $ref = Join-Path $repo "silent.wav"
-    if (Test-Path $ref) {
-        $orig = (Get-FileHash $ref -Algorithm SHA256).Hash
-        if ($gen -eq $orig) { Ok "generated silent.wav is byte-identical to the repo copy" }
-        else { Bad "generated silent.wav differs from silent.wav in the repo" }
-    } else { Warn "silent.wav not in repo; cannot compare (generated $gen)" }
-} finally {
-    Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
-}
-
-# --- 6. the changelog documents this version ------------------------------------
+# --- 5. the changelog documents this version ------------------------------------
 # Updates are silent, so an undocumented release is one nobody can find out about.
 Write-Host "`nChangelog"
 $clPath = Join-Path $repo "CHANGELOG.md"
@@ -156,7 +133,7 @@ else {
     }
 }
 
-# --- 7. nothing uncommitted -----------------------------------------------------
+# --- 6. nothing uncommitted -----------------------------------------------------
 Write-Host "`nWorking tree"
 try {
     Push-Location $repo

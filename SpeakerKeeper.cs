@@ -1,18 +1,16 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
-using Windows.Media.Core;
-using Windows.Media.Playback;
 
 // These become the Win32 version resource, which is what Windows shows as the
-// app's name in the Volume Mixer and in Task Manager. Without them the mixer
-// row is blank. It is also the name the UAC prompt shows, which is why the
-// uninstaller build gets its own title.
+// app's name in Task Manager. It is also the name the UAC prompt shows, which
+// is why the uninstaller build gets its own title.
 #if UNINSTALLER
 [assembly: AssemblyTitle("Speaker Keeper Uninstaller")]
 #elif INSTALLER
@@ -21,11 +19,11 @@ using Windows.Media.Playback;
 [assembly: AssemblyTitle("Speaker Keeper")]
 #endif
 [assembly: AssemblyProduct("Speaker Keeper")]
-[assembly: AssemblyDescription("Keeps a Bluetooth speaker awake with a silent media session")]
+[assembly: AssemblyDescription("Keeps a Bluetooth speaker awake with a silent audio stream")]
 [assembly: AssemblyCompany("Kevin Abou Hanna")]
 [assembly: AssemblyCopyright("Copyright (c) Kevin Abou Hanna")]
-[assembly: AssemblyVersion("1.2.1.0")]
-[assembly: AssemblyFileVersion("1.2.1.0")]
+[assembly: AssemblyVersion("1.3.0.0")]
+[assembly: AssemblyFileVersion("1.3.0.0")]
 
 [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
 class MMDeviceEnumeratorClass { }
@@ -44,6 +42,35 @@ interface IMMDevice
     int OpenPropertyStore(int access, out IntPtr store);
     int GetId([MarshalAs(UnmanagedType.LPWStr)] out string id);
     int GetState(out int state);
+}
+
+// WASAPI. The app renders its own silence through these rather than looping a file
+// through a media player, because a media player is visible to the user: it publishes
+// a transport session, which Windows shows as a "Speaker Keeper" card with
+// play/next/previous in the media flyout and then routes media keys to. See Silence.
+[ComImport, Guid("1CB9AD4C-DBFA-4C32-B178-C2F568A703B2"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IAudioClient
+{
+    int Initialize(int shareMode, int streamFlags, long bufferDuration, long periodicity,
+                   IntPtr format, ref Guid sessionGuid);
+    int GetBufferSize(out uint frames);
+    int GetStreamLatency(out long latency);
+    int GetCurrentPadding(out uint frames);
+    int IsFormatSupported(int shareMode, IntPtr format, out IntPtr closest);
+    int GetMixFormat(out IntPtr format);
+    int GetDevicePeriod(out long defaultPeriod, out long minPeriod);
+    int Start();
+    int Stop();
+    int Reset();
+    int SetEventHandle(IntPtr handle);
+    int GetService(ref Guid iid, [MarshalAs(UnmanagedType.IUnknown)] out object iface);
+}
+
+[ComImport, Guid("F294ACFC-3146-4483-A7BF-ADDCA7C260E2"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IAudioRenderClient
+{
+    int GetBuffer(uint frames, out IntPtr data);
+    int ReleaseBuffer(uint frames, int flags);
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -799,8 +826,8 @@ class LogWindow : Form
 
     readonly string _path;
     readonly TextBox _view;
-    readonly CheckBox _follow;
-    readonly Label _status;
+    readonly ToggleSwitch _follow;
+    readonly Note _status;
     readonly System.Windows.Forms.Timer _timer;
     long _pos;
 
@@ -811,9 +838,11 @@ class LogWindow : Form
         Text = "Speaker Keeper Log";
         Icon = icon;
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(780, 440);
-        MinimumSize = new Size(520, 300);
-        Font = SystemFonts.MessageBoxFont;
+        ClientSize = new Size(780, 460);
+        MinimumSize = new Size(520, 320);
+        Font = Fluent.Body;
+        BackColor = Fluent.Window;
+        Padding = new Padding(1, 0, 1, 0);
 
         // Added before the bottom bar: docking runs in reverse z-order, so the control
         // added first ends up filling whatever space the docked bars leave.
@@ -823,7 +852,11 @@ class LogWindow : Form
         _view.ScrollBars = ScrollBars.Both;
         _view.WordWrap = false;
         _view.Dock = DockStyle.Fill;
-        _view.BackColor = Color.White;      // ReadOnly would otherwise render grey
+        _view.BorderStyle = BorderStyle.None;
+        // ReadOnly renders grey unless the colours are set explicitly, and the default
+        // white would be a slab of glare in the middle of a dark window.
+        _view.BackColor = Fluent.Dark ? Color.FromArgb(0x1B, 0x1B, 0x1B) : Color.White;
+        _view.ForeColor = Fluent.Text;
         _view.Font = Monospace();
         Controls.Add(_view);
 
@@ -832,25 +865,30 @@ class LogWindow : Form
         // bar.Width here would be wrong once docking resizes it.
         var bar = new Panel();
         bar.Dock = DockStyle.Bottom;
-        bar.Height = 72;
-        bar.Padding = new Padding(12, 6, 12, 10);
+        bar.Height = 76;
+        bar.BackColor = Fluent.Window;
+        bar.Padding = new Padding(16, 8, 16, 12);
 
         var row = new Panel();
         row.Dock = DockStyle.Fill;
+        row.BackColor = Fluent.Window;
 
-        _follow = new CheckBox();
-        _follow.Text = "Follow live";
-        _follow.Checked = true;
-        _follow.AutoSize = false;
-        _follow.Width = 110;
-        _follow.Dock = DockStyle.Left;      // CheckBox centres its own text vertically
-        _follow.CheckedChanged += (s, e) => { if (_follow.Checked) Poll(); };
+        _follow = new ToggleSwitch();
+        _follow.SetSilently(true);
+        _follow.Location = new Point(0, 6);
+        _follow.Toggled += (s, e) => { if (_follow.On) Poll(); };
         row.Controls.Add(_follow);
 
-        var notepad = new Button();
+        var followLabel = new Note();
+        followLabel.Primary = true;
+        followLabel.Text = "Follow live";
+        followLabel.SetBounds(_follow.Right + 10, 0, 120, 32);
+        row.Controls.Add(followLabel);
+
+        var notepad = new FluentButton();
         notepad.Text = "Open in Notepad";
-        notepad.Size = new Size(130, 28);
-        notepad.Margin = new Padding(8, 4, 0, 0);
+        notepad.Size = new Size(140, 32);
+        notepad.Margin = new Padding(8, 0, 0, 0);
         notepad.Click += (s, e) =>
         {
             try
@@ -862,10 +900,10 @@ class LogWindow : Form
             catch { }
         };
 
-        var close = new Button();
+        var close = new FluentButton();
         close.Text = "Close";
-        close.Size = new Size(100, 28);
-        close.Margin = new Padding(8, 4, 0, 0);
+        close.Size = new Size(104, 32);
+        close.Margin = new Padding(8, 0, 0, 0);
         close.Click += (s, e) => Close();
 
         var buttons = new FlowLayoutPanel();
@@ -873,16 +911,14 @@ class LogWindow : Form
         buttons.FlowDirection = FlowDirection.RightToLeft;
         buttons.WrapContents = false;
         buttons.AutoSize = true;
+        buttons.BackColor = Fluent.Window;
         buttons.Controls.Add(close);        // right-to-left: rightmost added first
         buttons.Controls.Add(notepad);
         row.Controls.Add(buttons);
 
-        _status = new Label();
+        _status = new Note();
         _status.Dock = DockStyle.Top;
         _status.Height = 20;
-        _status.AutoEllipsis = true;
-        _status.ForeColor = SystemColors.GrayText;
-        _status.TextAlign = ContentAlignment.MiddleLeft;
         _status.Text = _path;
 
         bar.Controls.Add(row);              // added first, so it docks last and fills
@@ -895,6 +931,18 @@ class LogWindow : Form
         _timer.Interval = 1000;
         _timer.Tick += (s, e) => Poll();
         _timer.Start();
+
+        // The bars and the text view carry concrete colours rather than reading Fluent as
+        // they paint, so they have to be re-coloured rather than merely repainted.
+        Fluent.Follow(this, delegate
+        {
+            BackColor = Fluent.Window;
+            bar.BackColor = row.BackColor = buttons.BackColor = Fluent.Window;
+            _view.BackColor = Fluent.Dark ? Color.FromArgb(0x1B, 0x1B, 0x1B) : Color.White;
+            _view.ForeColor = Fluent.Text;
+            Fluent.Trim(this, false);
+            Fluent.DarkScrollbars(_view);
+        });
 
         Poll();
     }
@@ -917,7 +965,7 @@ class LogWindow : Form
     void Poll()
     {
         // Unchecking Follow freezes the view; _pos stays put so re-checking catches up.
-        if (!_follow.Checked) return;
+        if (!_follow.On) return;
 
         try
         {
@@ -961,6 +1009,13 @@ class LogWindow : Form
         }
     }
 
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        Fluent.Trim(this, false);
+        Fluent.DarkScrollbars(_view);
+    }
+
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
         try { _timer.Stop(); _timer.Dispose(); } catch { }
@@ -968,27 +1023,1260 @@ class LogWindow : Form
     }
 }
 
-/// <summary>The "Settings..." window: the handful of knobs that don't belong in the tray menu.</summary>
+// =============================================================================
+// The Windows 11 look, hand-drawn.
+//
+// WinForms hands out Win32 common controls that have looked the same since 2001:
+// square grey boxes with a hard-coded light palette. There is no theme to switch
+// to, so every surface the user sees - the flyout, the settings window, the
+// toggles - is painted here instead, following the Fluent palette, metrics and
+// motion so the app looks like part of the system rather than a relic.
+//
+// Everything reads its colours from Fluent rather than holding its own, so one
+// theme switch repaints the whole app.
+// =============================================================================
+
+/// <summary>Palette, type and window trim for the Fluent look.</summary>
+static class Fluent
+{
+    const string ThemeKey = "Software" + "\\" + "Microsoft" + "\\" + "Windows" + "\\"
+                          + "CurrentVersion" + "\\" + "Themes" + "\\" + "Personalize";
+    const string AccentKey = "Software" + "\\" + "Microsoft" + "\\" + "Windows" + "\\"
+                           + "CurrentVersion" + "\\" + "Explorer" + "\\" + "Accent";
+
+    [DllImport("dwmapi.dll")]
+    static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+    static extern int SetWindowTheme(IntPtr hwnd, string app, string id);
+
+    // DWMWA_USE_IMMERSIVE_DARK_MODE moved from 19 to 20 in Windows 10 2004. Both are
+    // tried: the wrong one is simply rejected, so there is nothing to detect.
+    const int DarkModeOld = 19, DarkMode = 20, CornerPreference = 33, BorderColour = 34;
+    const int RoundCorners = 2, RoundSmall = 3;
+
+    public static bool Dark { get; private set; }
+    public static Color Accent { get; private set; }
+
+    /// <summary>Raised after a theme switch, so open windows can repaint in the new colours.</summary>
+    public static event EventHandler Changed;
+
+    // --- surfaces ---------------------------------------------------------------
+    public static Color Window { get { return Dark ? Rgb(0x202020) : Rgb(0xF3F3F3); } }
+    public static Color Card { get { return Dark ? Rgb(0x2B2B2B) : Rgb(0xFFFFFF); } }
+    public static Color CardHover { get { return Dark ? Rgb(0x323232) : Rgb(0xF9F9F9); } }
+    public static Color Stroke { get { return Dark ? Rgb(0x373737) : Rgb(0xE5E5E5); } }
+    public static Color Divider { get { return Dark ? Rgb(0x303030) : Rgb(0xE9E9E9); } }
+    public static Color Subtle { get { return Dark ? Rgb(0x2D2D2D) : Rgb(0xEDEDED); } }
+    public static Color SubtleHover { get { return Dark ? Rgb(0x383838) : Rgb(0xE4E4E4); } }
+
+    // --- text -------------------------------------------------------------------
+    public static Color Text { get { return Dark ? Rgb(0xFFFFFF) : Rgb(0x1A1A1A); } }
+    public static Color TextSecondary { get { return Dark ? Rgb(0xC8C8C8) : Rgb(0x5D5D5D); } }
+    public static Color TextTertiary { get { return Dark ? Rgb(0x8B8B8B) : Rgb(0x8A8A8A); } }
+    public static Color OnAccent { get { return Dark ? Rgb(0x000000) : Rgb(0xFFFFFF); } }
+
+    // --- type -------------------------------------------------------------------
+    // Fluent sizes are in pixels; WinForms wants points, and 96 DPI is 0.75 pt per px.
+    // Everything scales from there through the form's own AutoScaleMode.
+    public static Font Caption { get; private set; }     // 12px
+    public static Font Body { get; private set; }        // 14px
+    public static Font BodyStrong { get; private set; }  // 14px semibold
+    public static Font Subtitle { get; private set; }    // 20px semibold
+    public static Font Title { get; private set; }       // 28px semibold
+    public static Font Glyphs { get; private set; }      // icon font, 16px
+    public static Font GlyphsSmall { get; private set; } // icon font, 12px
+
+    // Segoe Fluent Icons ships with Windows 11; Windows 10 has the same glyphs under the
+    // older name. Codepoints used across the app: gear E713, volume E767, bluetooth E702,
+    // power E7E8, download E896, warning E7BA, info E946, document E8A5, folder E8B7.
+    public const string IconSettings = "";
+    public const string IconVolume = "";
+    public const string IconBluetooth = "";
+    public const string IconPower = "";
+    public const string IconDownload = "";
+    public const string IconWarning = "";
+    public const string IconInfo = "";
+    public const string IconDocument = "";
+    public const string IconFolder = "";
+    public const string IconMinus = "";
+    public const string IconPlus = "";
+
+    static Fluent()
+    {
+        Reload();
+        Microsoft.Win32.SystemEvents.UserPreferenceChanged += (s, e) =>
+        {
+            if (e.Category != Microsoft.Win32.UserPreferenceCategory.General &&
+                e.Category != Microsoft.Win32.UserPreferenceCategory.Color) return;
+            bool wasDark = Dark;
+            var wasAccent = Accent;
+            Reload();
+            if (wasDark == Dark && wasAccent == Accent) return;
+            var h = Changed;
+            if (h != null) h(null, EventArgs.Empty);
+        };
+    }
+
+    /// <summary>
+    /// Repaints a control whenever the theme changes, and lets go when it is disposed.
+    ///
+    /// SystemEvents raises on its own thread, not the UI one, so the repaint has to be
+    /// posted across - touching a control's colours from the notification thread either
+    /// does nothing visible or throws, depending on the day.
+    /// </summary>
+    public static void Follow(Control c, Action apply)
+    {
+        EventHandler h = null;
+        h = delegate
+        {
+            if (c.IsDisposed) { Changed -= h; return; }
+            if (c.IsHandleCreated && c.InvokeRequired)
+            {
+                try { c.BeginInvoke(new Action(delegate { Repaint(c, apply); })); }
+                catch { }
+                return;
+            }
+            Repaint(c, apply);
+        };
+        Changed += h;
+        c.Disposed += delegate { Changed -= h; };
+    }
+
+    static void Repaint(Control c, Action apply)
+    {
+        if (c.IsDisposed) return;
+        try { apply(); c.Invalidate(true); }
+        catch { }
+    }
+
+    static void Reload()
+    {
+        Dark = ReadDark();
+        Accent = ReadAccent(Dark);
+        if (Caption != null) return;   // fonts don't change with the theme
+
+        // "Segoe UI Variable" is the Windows 11 UI face; Windows 10 falls back to Segoe UI.
+        string text = Family("Segoe UI Variable Text", "Segoe UI");
+        string display = Family("Segoe UI Variable Display", text);
+        string semibold = Family("Segoe UI Variable Display Semib", Family("Segoe UI Semibold", display));
+        string icons = Family("Segoe Fluent Icons", Family("Segoe MDL2 Assets", "Segoe UI Symbol"));
+
+        Caption = new Font(text, 9f);
+        Body = new Font(text, 10.5f);
+        BodyStrong = new Font(semibold, 10.5f);
+        Subtitle = new Font(semibold, 15f);
+        Title = new Font(display, 18f, FontStyle.Bold);
+        Glyphs = new Font(icons, 12f);
+        GlyphsSmall = new Font(icons, 9f);
+    }
+
+    /// <summary>The first of these families that is actually installed.</summary>
+    static string Family(string preferred, string fallback)
+    {
+        try
+        {
+            using (var c = new System.Drawing.Text.InstalledFontCollection())
+                foreach (var f in c.Families)
+                    if (string.Equals(f.Name, preferred, StringComparison.OrdinalIgnoreCase))
+                        return preferred;
+        }
+        catch { }
+        return fallback;
+    }
+
+    static bool ReadDark()
+    {
+        try
+        {
+            using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(ThemeKey))
+            {
+                if (k == null) return false;
+                var v = k.GetValue("AppsUseLightTheme");
+                return v != null && Convert.ToInt32(v) == 0;
+            }
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// The user's accent colour, taken from the palette Windows itself derives.
+    ///
+    /// The palette is eight RGBA entries running light to dark: Light3, Light2, Light1,
+    /// the accent itself, then Dark1..3. Dark mode uses Light2 rather than the accent
+    /// because the same blue at full strength is unreadable on a dark surface - which is
+    /// why the two themes read different entries rather than sharing one colour.
+    /// </summary>
+    static Color ReadAccent(bool dark)
+    {
+        try
+        {
+            using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(AccentKey))
+            {
+                var raw = k == null ? null : k.GetValue("AccentPalette") as byte[];
+                if (raw != null && raw.Length >= 16)
+                {
+                    int i = dark ? 4 : 12;   // AccentLight2, or the accent itself
+                    return Color.FromArgb(raw[i], raw[i + 1], raw[i + 2]);
+                }
+            }
+        }
+        catch { }
+        return dark ? Rgb(0x4CC2FF) : Rgb(0x0078D4);
+    }
+
+    static Color Rgb(int v) { return Color.FromArgb((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF); }
+
+    /// <summary>Accent shifted toward or away from the surface, for hover and press states.</summary>
+    public static Color Shade(Color c, double amount)
+    {
+        double t = Dark ? 1 - amount : 1 + amount;   // on dark, "darker" reads as dimmer
+        return Color.FromArgb(c.A,
+            (int)Math.Max(0, Math.Min(255, c.R * t)),
+            (int)Math.Max(0, Math.Min(255, c.G * t)),
+            (int)Math.Max(0, Math.Min(255, c.B * t)));
+    }
+
+    /// <summary>Titlebar, border and corners, for a window with a frame.</summary>
+    public static void Trim(Form f, bool small)
+    {
+        if (!f.IsHandleCreated) return;
+        int on = Dark ? 1 : 0;
+        Try(f.Handle, DarkMode, on);
+        Try(f.Handle, DarkModeOld, on);
+        Try(f.Handle, CornerPreference, small ? RoundSmall : RoundCorners);
+    }
+
+    /// <summary>Rounded corners and a hairline border, for a window with no frame.</summary>
+    public static void Borderless(Form f)
+    {
+        if (!f.IsHandleCreated) return;
+        Try(f.Handle, CornerPreference, RoundCorners);
+        // COLORREF is 0x00BBGGRR, not RGB.
+        var b = Stroke;
+        Try(f.Handle, BorderColour, (b.B << 16) | (b.G << 8) | b.R);
+    }
+
+    /// <summary>
+    /// Asks a native control to use the dark theme's scrollbars.
+    ///
+    /// The scrollbars on a TextBox or a scrolling Panel are drawn by Windows, not by us,
+    /// and they default to the light theme regardless of what the window around them is
+    /// doing. This is the documented way to ask otherwise. It is a request, not a
+    /// guarantee - where Windows declines, the control simply keeps the bars it had.
+    /// </summary>
+    public static void DarkScrollbars(Control c)
+    {
+        if (!Dark || c == null || !c.IsHandleCreated) return;
+        try { SetWindowTheme(c.Handle, "DarkMode_Explorer", null); } catch { }
+    }
+
+    static void Try(IntPtr h, int attr, int value)
+    {
+        // Every one of these is version-gated; an old build simply rejects the call and
+        // the window keeps the frame it would have had anyway.
+        try { DwmSetWindowAttribute(h, attr, ref value, sizeof(int)); } catch { }
+    }
+
+    public static GraphicsPath Rounded(RectangleF r, float radius)
+    {
+        var p = new GraphicsPath();
+        if (radius <= 0) { p.AddRectangle(r); return p; }
+        float d = radius * 2;
+        p.AddArc(r.X, r.Y, d, d, 180, 90);
+        p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+        p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+        p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+        p.CloseFigure();
+        return p;
+    }
+
+    public static void FillRounded(Graphics g, RectangleF r, float radius, Color fill)
+    {
+        using (var p = Rounded(r, radius))
+        using (var b = new SolidBrush(fill))
+            g.FillPath(b, p);
+    }
+
+    public static void DrawRounded(Graphics g, RectangleF r, float radius, Color fill, Color stroke)
+    {
+        // Inset by half a pixel so the 1px stroke lands on the pixel grid instead of
+        // straddling it, which is what makes hand-drawn borders look muddy.
+        var rr = new RectangleF(r.X + 0.5f, r.Y + 0.5f, r.Width - 1, r.Height - 1);
+        using (var p = Rounded(rr, radius))
+        {
+            using (var b = new SolidBrush(fill)) g.FillPath(b, p);
+            using (var pen = new Pen(stroke, 1)) g.DrawPath(pen, p);
+        }
+    }
+
+    public static void Quality(Graphics g)
+    {
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+        g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+    }
+
+    /// <summary>Text drawn with GDI, which is what makes it match the rest of the shell.</summary>
+    public static void Draw(Graphics g, string s, Font f, Color c, Rectangle r, TextFormatFlags flags)
+    {
+        TextRenderer.DrawText(g, s, f, r, c, flags);
+    }
+
+    public static Size Measure(string s, Font f, int maxWidth)
+    {
+        return TextRenderer.MeasureText(s, f, new Size(maxWidth, int.MaxValue),
+            TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl);
+    }
+}
+
+/// <summary>
+/// The Fluent pill switch.
+///
+/// Drawn rather than themed, and animated, because the movement is what tells you the
+/// click landed - a WinForms CheckBox gives no such feedback and reads as a form field
+/// rather than a setting.
+/// </summary>
+class ToggleSwitch : Control
+{
+    const int TrackW = 40, TrackH = 20, Knob = 12;
+
+    bool _on, _hover, _down;
+    float _pos;                 // 0 = off, 1 = on; the animated value
+    readonly System.Windows.Forms.Timer _anim;
+
+    public event EventHandler Toggled;
+
+    public ToggleSwitch()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw |
+                 ControlStyles.SupportsTransparentBackColor, true);
+        BackColor = Color.Transparent;
+        Size = new Size(TrackW, TrackH);
+        Cursor = Cursors.Hand;
+        TabStop = true;
+
+        _anim = new System.Windows.Forms.Timer();
+        _anim.Interval = 15;
+        _anim.Tick += (s, e) =>
+        {
+            float target = _on ? 1f : 0f;
+            float step = 0.16f;
+            if (Math.Abs(_pos - target) <= step) { _pos = target; _anim.Stop(); }
+            else _pos += _pos < target ? step : -step;
+            Invalidate();
+        };
+    }
+
+    /// <summary>Sets the switch without raising Toggled - for loading stored state.</summary>
+    public void SetSilently(bool value)
+    {
+        _on = value;
+        _pos = value ? 1f : 0f;
+        _anim.Stop();
+        Invalidate();
+    }
+
+    public bool On
+    {
+        get { return _on; }
+        set
+        {
+            if (_on == value) return;
+            _on = value;
+            _anim.Start();
+            var h = Toggled;
+            if (h != null) h(this, EventArgs.Empty);
+        }
+    }
+
+    protected override void OnEnabledChanged(EventArgs e)
+    {
+        _hover = _down = false;
+        Cursor = Enabled ? Cursors.Hand : Cursors.Default;
+        Invalidate();
+        base.OnEnabledChanged(e);
+    }
+
+    protected override void OnMouseEnter(EventArgs e) { _hover = true; Invalidate(); base.OnMouseEnter(e); }
+    protected override void OnMouseLeave(EventArgs e) { _hover = false; _down = false; Invalidate(); base.OnMouseLeave(e); }
+    protected override void OnMouseDown(MouseEventArgs e) { _down = true; Invalidate(); Focus(); base.OnMouseDown(e); }
+    protected override void OnMouseUp(MouseEventArgs e) { _down = false; Invalidate(); base.OnMouseUp(e); }
+    protected override void OnClick(EventArgs e) { On = !On; base.OnClick(e); }
+    protected override bool IsInputKey(Keys k) { return k == Keys.Space || base.IsInputKey(k); }
+    protected override void OnKeyUp(KeyEventArgs e)
+    {
+        if (e.KeyCode == Keys.Space) On = !On;
+        base.OnKeyUp(e);
+    }
+    protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
+    protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        Fluent.Quality(g);
+
+        int y = (Height - TrackH) / 2;
+        var track = new RectangleF(0, y, TrackW, TrackH);
+        float r = TrackH / 2f;
+
+        Color fill, stroke, knob;
+        if (!Enabled)
+        {
+            fill = _on ? Fluent.Subtle : Color.Transparent;
+            stroke = Fluent.Stroke;
+            knob = Fluent.TextTertiary;
+        }
+        else if (_on)
+        {
+            fill = _down ? Fluent.Shade(Fluent.Accent, 0.2) : _hover ? Fluent.Shade(Fluent.Accent, 0.1) : Fluent.Accent;
+            stroke = fill;
+            knob = Fluent.OnAccent;
+        }
+        else
+        {
+            fill = _down ? Fluent.SubtleHover : _hover ? Fluent.Subtle : Color.Transparent;
+            stroke = Fluent.Dark ? Color.FromArgb(150, 255, 255, 255) : Color.FromArgb(140, 0, 0, 0);
+            knob = Fluent.Dark ? Color.FromArgb(210, 255, 255, 255) : Color.FromArgb(160, 0, 0, 0);
+        }
+
+        using (var p = Fluent.Rounded(new RectangleF(track.X + 0.5f, track.Y + 0.5f, track.Width - 1, track.Height - 1), r))
+        {
+            if (fill != Color.Transparent) using (var b = new SolidBrush(fill)) g.FillPath(b, p);
+            using (var pen = new Pen(stroke, 1)) g.DrawPath(pen, p);
+        }
+
+        // The knob swells slightly while pressed, the way the system one does.
+        float grow = _down ? 2f : 0f;
+        float travel = TrackW - Knob - 8;
+        float kx = 4 + travel * _pos - grow / 2;
+        float ky = y + (TrackH - Knob) / 2f - grow / 2;
+        using (var b = new SolidBrush(knob))
+            g.FillEllipse(b, kx, ky, Knob + grow, Knob + grow);
+
+        if (Focused && ShowFocusCues)
+            using (var pen = new Pen(Fluent.Text, 2))
+                g.DrawPath(pen, Fluent.Rounded(new RectangleF(track.X - 3, track.Y - 3, track.Width + 6, track.Height + 6), r + 3));
+    }
+}
+
+/// <summary>A Fluent button: accent-filled when primary, a quiet card otherwise.</summary>
+class FluentButton : Control, IButtonControl
+{
+    bool _hover, _down;
+
+    // IButtonControl, so a form can still nominate one of these as its AcceptButton or
+    // CancelButton - which is what makes Enter and Escape work at all.
+    public DialogResult DialogResult { get; set; }
+    public void NotifyDefault(bool value) { }
+    public void PerformClick() { if (Enabled) OnClick(EventArgs.Empty); }
+
+    public bool Primary { get; set; }
+    /// <summary>No fill until hovered, for icon buttons sitting on a card.</summary>
+    public bool Quiet { get; set; }
+    public string Glyph { get; set; }
+
+    public FluentButton()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw |
+                 ControlStyles.SupportsTransparentBackColor, true);
+        BackColor = Color.Transparent;
+        Cursor = Cursors.Hand;
+        Size = new Size(120, 32);
+    }
+
+    protected override void OnMouseEnter(EventArgs e) { _hover = true; Invalidate(); base.OnMouseEnter(e); }
+    protected override void OnMouseLeave(EventArgs e) { _hover = false; _down = false; Invalidate(); base.OnMouseLeave(e); }
+    protected override void OnMouseDown(MouseEventArgs e) { _down = true; Invalidate(); base.OnMouseDown(e); }
+    protected override void OnMouseUp(MouseEventArgs e) { _down = false; Invalidate(); base.OnMouseUp(e); }
+    protected override bool IsInputKey(Keys k) { return k == Keys.Space || base.IsInputKey(k); }
+    protected override void OnKeyUp(KeyEventArgs e)
+    {
+        if (e.KeyCode == Keys.Space || e.KeyCode == Keys.Enter) PerformClick();
+        base.OnKeyUp(e);
+    }
+    protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
+    protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+    protected override void OnEnabledChanged(EventArgs e)
+    {
+        _hover = _down = false;
+        Cursor = Enabled ? Cursors.Hand : Cursors.Default;
+        Invalidate();
+        base.OnEnabledChanged(e);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        Fluent.Quality(g);
+        var r = new RectangleF(0, 0, Width, Height);
+
+        Color fill, stroke, fore;
+        if (!Enabled)
+        {
+            // Without this a disabled button is indistinguishable from a live one, and
+            // the wizard spends whole pages with all three of them switched off.
+            fill = Fluent.Subtle;
+            stroke = Quiet ? Fluent.Subtle : Fluent.Stroke;
+            fore = Fluent.TextTertiary;
+        }
+        else if (Primary)
+        {
+            fill = _down ? Fluent.Shade(Fluent.Accent, 0.2) : _hover ? Fluent.Shade(Fluent.Accent, 0.1) : Fluent.Accent;
+            stroke = fill;
+            fore = Fluent.OnAccent;
+        }
+        else if (Quiet)
+        {
+            fill = _down ? Fluent.SubtleHover : _hover ? Fluent.Subtle : Color.Transparent;
+            stroke = fill;
+            fore = Fluent.Text;
+        }
+        else
+        {
+            fill = _down ? Fluent.Subtle : _hover ? Fluent.CardHover : Fluent.Card;
+            stroke = Fluent.Stroke;
+            fore = Fluent.Text;
+        }
+
+        if (fill == Color.Transparent && stroke == Color.Transparent)
+        { /* nothing to draw */ }
+        else if (stroke == fill)
+            Fluent.FillRounded(g, r, 4, fill);
+        else
+            Fluent.DrawRounded(g, r, 4, fill, stroke);
+
+        const TextFormatFlags centre = TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter
+                                     | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix;
+        if (!string.IsNullOrEmpty(Glyph) && string.IsNullOrEmpty(Text))
+            Fluent.Draw(g, Glyph, Fluent.Glyphs, fore, ClientRectangle, centre);
+        else
+            Fluent.Draw(g, Text, Fluent.Body, fore, ClientRectangle, centre);
+
+        if (Focused && ShowFocusCues)
+            using (var pen = new Pen(Fluent.Text, 2))
+                g.DrawPath(pen, Fluent.Rounded(new RectangleF(-2, -2, Width + 4, Height + 4), 6));
+    }
+}
+
+/// <summary>
+/// A number with minus and plus buttons.
+///
+/// NumericUpDown is a native control with a hard-coded white field, so in dark mode it
+/// lands on the page as a glowing white rectangle. This is the same thing, painted.
+/// </summary>
+class NumberStepper : Control
+{
+    int _value = 20, _min = 5, _max = 95, _step = 5;
+    int _hot;   // 0 none, 1 minus, 2 plus
+
+    public event EventHandler ValueChanged;
+    public string Suffix { get; set; }
+
+    public NumberStepper()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw |
+                 ControlStyles.SupportsTransparentBackColor, true);
+        BackColor = Color.Transparent;
+        Size = new Size(116, 32);
+        Suffix = "";
+    }
+
+    public void Configure(int min, int max, int step) { _min = min; _max = max; _step = step; }
+
+    public int Value
+    {
+        get { return _value; }
+        set
+        {
+            int v = Math.Max(_min, Math.Min(_max, value));
+            if (v == _value) return;
+            _value = v;
+            Invalidate();
+            var h = ValueChanged;
+            if (h != null) h(this, EventArgs.Empty);
+        }
+    }
+
+    public void SetSilently(int v)
+    {
+        _value = Math.Max(_min, Math.Min(_max, v));
+        Invalidate();
+    }
+
+    Rectangle Minus { get { return new Rectangle(0, 0, 32, Height); } }
+    Rectangle Plus { get { return new Rectangle(Width - 32, 0, 32, Height); } }
+
+    protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        int was = _hot;
+        _hot = Minus.Contains(e.Location) ? 1 : Plus.Contains(e.Location) ? 2 : 0;
+        Cursor = _hot == 0 ? Cursors.Default : Cursors.Hand;
+        if (was != _hot) Invalidate();
+        base.OnMouseMove(e);
+    }
+
+    protected override void OnMouseLeave(EventArgs e) { _hot = 0; Invalidate(); base.OnMouseLeave(e); }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        if (Minus.Contains(e.Location)) Value = _value - _step;
+        else if (Plus.Contains(e.Location)) Value = _value + _step;
+        base.OnMouseDown(e);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        Fluent.Quality(g);
+        Fluent.DrawRounded(g, new RectangleF(0, 0, Width, Height), 4, Fluent.Card, Fluent.Stroke);
+
+        const TextFormatFlags centre = TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter
+                                     | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix;
+
+        if (_hot != 0 && Enabled)
+        {
+            var hot = _hot == 1 ? Minus : Plus;
+            Fluent.FillRounded(g, new RectangleF(hot.X + 2, hot.Y + 2, hot.Width - 4, hot.Height - 4), 3, Fluent.Subtle);
+        }
+
+        Color text = Enabled ? Fluent.Text : Fluent.TextTertiary;
+        Color down = Enabled && _value > _min ? text : Fluent.TextTertiary;
+        Color up = Enabled && _value < _max ? text : Fluent.TextTertiary;
+        Fluent.Draw(g, Fluent.IconMinus, Fluent.GlyphsSmall, down, Minus, centre);
+        Fluent.Draw(g, Fluent.IconPlus, Fluent.GlyphsSmall, up, Plus, centre);
+        Fluent.Draw(g, _value + Suffix, Fluent.Body, text,
+            new Rectangle(32, 0, Width - 64, Height), centre);
+    }
+}
+
+/// <summary>
+/// A text field with the Fluent frame: rounded, and an accent underline while focused.
+///
+/// The TextBox inside is borderless and carries the theme's colours, because a stock one
+/// paints a white field with a grey 3D frame whatever the window around it is doing.
+/// </summary>
+class FluentTextBox : Panel
+{
+    public readonly TextBox Inner;
+
+    public FluentTextBox()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        Height = 32;
+
+        Inner = new TextBox();
+        Inner.BorderStyle = BorderStyle.None;
+        Inner.Font = Fluent.Body;
+        Inner.BackColor = Fluent.Card;
+        Inner.ForeColor = Fluent.Text;
+        Inner.GotFocus += (s, e) => Invalidate();
+        Inner.LostFocus += (s, e) => Invalidate();
+        Controls.Add(Inner);
+
+        Fluent.Follow(this, delegate
+        {
+            Inner.BackColor = Fluent.Card;
+            Inner.ForeColor = Fluent.Text;
+        });
+    }
+
+    public override string Text
+    {
+        get { return Inner.Text; }
+        set { Inner.Text = value; }
+    }
+
+    protected override void OnSizeChanged(EventArgs e)
+    {
+        base.OnSizeChanged(e);
+        // Setting Height in the constructor gets here before Inner exists.
+        if (Inner == null) return;
+
+        // The TextBox sizes its own height from the font; centre whatever it decided on.
+        Inner.SetBounds(11, Math.Max(1, (Height - Inner.Height) / 2),
+            Math.Max(10, Width - 22), Inner.Height);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        Fluent.Quality(g);
+        Fluent.DrawRounded(g, new RectangleF(0, 0, Width, Height), 4, Fluent.Card, Fluent.Stroke);
+        if (!Inner.Focused) return;
+
+        // Fluent marks the focused field with a thicker accent line along the bottom.
+        using (var pen = new Pen(Fluent.Accent, 2))
+            g.DrawLine(pen, 5, Height - 1, Width - 5, Height - 1);
+    }
+}
+
+/// <summary>The Windows 11 progress bar: a thin accent line in a thin trough.</summary>
+class FluentProgress : Control
+{
+    int _value;
+
+    public FluentProgress()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        Height = 12;
+    }
+
+    public int Value
+    {
+        get { return _value; }
+        set { _value = Math.Max(0, Math.Min(100, value)); Invalidate(); }
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        Fluent.Quality(g);
+        float y = (Height - 3) / 2f;
+        Fluent.FillRounded(g, new RectangleF(0, y, Width, 3), 1.5f, Fluent.Stroke);
+        if (_value > 0)
+            Fluent.FillRounded(g, new RectangleF(0, y, Width * _value / 100f, 3), 1.5f, Fluent.Accent);
+    }
+}
+
+/// <summary>
+/// One row of the settings pages: a rounded card with a glyph, a title, an optional
+/// line of explanation, and whatever control does the work sitting on the right.
+/// </summary>
+class SettingsCard : Control
+{
+    const int PadX = 16, PadY = 12, GlyphW = 40;
+
+    bool _hover;
+    Control _action;
+
+    public string Glyph { get; set; }
+    public string Title { get; set; }
+    public string Description { get; set; }
+    /// <summary>Greys the text without disabling the card, for a setting that has no effect yet.</summary>
+    public bool Muted { get; set; }
+
+    public SettingsCard()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        Height = 68;
+        Glyph = "";
+        Title = "";
+    }
+
+    public void SetAction(Control c)
+    {
+        _action = c;
+        Controls.Add(c);
+        Layout2();
+
+        // Clicking anywhere on the row flips its switch. A 40px toggle is a small target,
+        // and every row in the Settings app behaves this way, so aiming for it is a habit
+        // people have already unlearned.
+        var toggle = c as ToggleSwitch;
+        if (toggle != null)
+        {
+            Cursor = Cursors.Hand;
+            Click += (s, e) => { if (toggle.Enabled) toggle.On = !toggle.On; };
+        }
+    }
+
+    protected override void OnMouseEnter(EventArgs e) { _hover = true; Invalidate(); base.OnMouseEnter(e); }
+    protected override void OnMouseLeave(EventArgs e) { _hover = false; Invalidate(); base.OnMouseLeave(e); }
+    protected override void OnSizeChanged(EventArgs e) { Layout2(); base.OnSizeChanged(e); }
+
+    void Layout2()
+    {
+        if (_action == null) return;
+        _action.Location = new Point(Width - PadX - _action.Width, (Height - _action.Height) / 2);
+        _action.Anchor = AnchorStyles.Right | AnchorStyles.Top;
+    }
+
+    /// <summary>Tall enough for the description at this width, so nothing is clipped.</summary>
+    public void FitHeight()
+    {
+        int textW = TextWidth();
+        int h = PadY * 2 + TextRenderer.MeasureText(Title, Fluent.Body).Height;
+        if (!string.IsNullOrEmpty(Description))
+            h += 2 + Fluent.Measure(Description, Fluent.Caption, textW).Height;
+        Height = Math.Max(52, h);
+        Layout2();
+    }
+
+    int TextWidth()
+    {
+        int right = _action != null ? _action.Width + 12 : 0;
+        return Math.Max(40, Width - PadX * 2 - GlyphW - right);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        Fluent.Quality(g);
+        Fluent.DrawRounded(g, new RectangleF(0, 0, Width, Height), 4,
+            _hover ? Fluent.CardHover : Fluent.Card, Fluent.Stroke);
+
+        Color title = Muted ? Fluent.TextTertiary : Fluent.Text;
+        Color desc = Muted ? Fluent.TextTertiary : Fluent.TextSecondary;
+
+        if (!string.IsNullOrEmpty(Glyph))
+            Fluent.Draw(g, Glyph, Fluent.Glyphs, desc, new Rectangle(PadX, 0, GlyphW - 12, Height),
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+
+        int x = PadX + GlyphW;
+        int w = TextWidth();
+        int titleH = TextRenderer.MeasureText(Title, Fluent.Body).Height;
+        bool hasDesc = !string.IsNullOrEmpty(Description);
+        int descH = hasDesc ? Fluent.Measure(Description, Fluent.Caption, w).Height : 0;
+        int y = (Height - titleH - (hasDesc ? descH + 2 : 0)) / 2;
+
+        Fluent.Draw(g, Title, Fluent.Body, title, new Rectangle(x, y, w, titleH),
+            TextFormatFlags.Left | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
+        if (hasDesc)
+            Fluent.Draw(g, Description, Fluent.Caption, desc, new Rectangle(x, y + titleH + 2, w, descH),
+                TextFormatFlags.Left | TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix);
+    }
+}
+
+/// <summary>An entry in the settings window's left rail, with the Fluent selection pill.</summary>
+class NavItem : Control
+{
+    bool _hover, _selected;
+
+    public string Glyph { get; set; }
+    public string Page { get; set; }
+
+    public NavItem()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        Height = 36;
+        Cursor = Cursors.Hand;
+        Glyph = "";
+    }
+
+    public bool Selected
+    {
+        get { return _selected; }
+        set { _selected = value; Invalidate(); }
+    }
+
+    protected override void OnMouseEnter(EventArgs e) { _hover = true; Invalidate(); base.OnMouseEnter(e); }
+    protected override void OnMouseLeave(EventArgs e) { _hover = false; Invalidate(); base.OnMouseLeave(e); }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        Fluent.Quality(g);
+
+        var r = new RectangleF(0, 1, Width, Height - 2);
+        if (_selected) Fluent.DrawRounded(g, r, 4, Fluent.Card, Fluent.Stroke);
+        else if (_hover) Fluent.FillRounded(g, r, 4, Fluent.Subtle);
+
+        if (_selected)
+        {
+            // The accent pill: three pixels wide, centred, and short of the full height.
+            var pill = new RectangleF(1, Height / 2f - 8, 3, 16);
+            Fluent.FillRounded(g, pill, 1.5f, Fluent.Accent);
+        }
+
+        Fluent.Draw(g, Glyph, Fluent.GlyphsSmall, Fluent.Text, new Rectangle(14, 0, 20, Height),
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+        Fluent.Draw(g, Text, Fluent.Body, Fluent.Text, new Rectangle(42, 0, Width - 50, Height),
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix
+            | TextFormatFlags.EndEllipsis);
+    }
+}
+
+/// <summary>Dark colours for the tray's right-click menu, which WinForms otherwise paints light.</summary>
+class FluentMenuColours : ProfessionalColorTable
+{
+    public override Color ToolStripDropDownBackground { get { return Fluent.Card; } }
+    public override Color MenuBorder { get { return Fluent.Stroke; } }
+    public override Color MenuItemBorder { get { return Color.Transparent; } }
+    public override Color MenuItemSelected { get { return Fluent.Subtle; } }
+    public override Color MenuItemSelectedGradientBegin { get { return Fluent.Subtle; } }
+    public override Color MenuItemSelectedGradientEnd { get { return Fluent.Subtle; } }
+    public override Color ImageMarginGradientBegin { get { return Fluent.Card; } }
+    public override Color ImageMarginGradientMiddle { get { return Fluent.Card; } }
+    public override Color ImageMarginGradientEnd { get { return Fluent.Card; } }
+    public override Color SeparatorDark { get { return Fluent.Divider; } }
+    public override Color SeparatorLight { get { return Fluent.Divider; } }
+}
+
+class FluentMenuRenderer : ToolStripProfessionalRenderer
+{
+    public FluentMenuRenderer() : base(new FluentMenuColours()) { RoundedEdges = false; }
+
+    protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+    {
+        e.TextColor = e.Item.Enabled ? Fluent.Text : Fluent.TextTertiary;
+        e.TextFont = Fluent.Body;
+        base.OnRenderItemText(e);
+    }
+}
+
+/// <summary>What the tray UI needs to know about the current output, in one read.</summary>
+class OutputStatus
+{
+    public string Name = "No output";
+    public Guid Container;
+    public bool Bluetooth;
+    public int Battery = -1;
+    public string Charge = "";
+    public bool KeepingAwake;
+    public string IdleReason;
+}
+
+/// <summary>
+/// The panel that opens from the tray icon.
+///
+/// Modelled on the system's own flyouts - the volume and brightness popovers - because
+/// that is what a tray app opening on one click should feel like: a small panel anchored
+/// to the notification area that closes as soon as you look away, not a dialog that
+/// lands in the middle of the screen and has to be dismissed.
+/// </summary>
+class TrayFlyout : Form
+{
+    const int W = 340, Pad = 12;
+
+    readonly ToggleSwitch _keep;
+    readonly FluentButton _settings, _quit;
+    OutputStatus _s = new OutputStatus();
+
+    Rectangle _card;
+    DateTime _closedAt = DateTime.MinValue;
+
+    public event EventHandler SettingsRequested;
+    public event EventHandler QuitRequested;
+    public event EventHandler PolicyChanged;
+
+    public TrayFlyout()
+    {
+        FormBorderStyle = FormBorderStyle.None;
+        ShowInTaskbar = false;
+        StartPosition = FormStartPosition.Manual;
+        TopMost = true;
+        AutoScaleMode = AutoScaleMode.Dpi;
+        DoubleBuffered = true;
+        Font = Fluent.Body;
+        ClientSize = new Size(W, 196);
+
+        _keep = new ToggleSwitch();
+        _keep.Toggled += (s, e) =>
+        {
+            if (_s.Container == Guid.Empty) return;
+            DevicePolicy.SetEnabled(_s.Container, _s.Name, _keep.On);
+            var h = PolicyChanged;
+            if (h != null) h(this, EventArgs.Empty);
+        };
+        Controls.Add(_keep);
+
+        _settings = new FluentButton();
+        _settings.Quiet = true;
+        _settings.Glyph = Fluent.IconSettings;
+        _settings.Size = new Size(32, 32);
+        _settings.Click += (s, e) =>
+        {
+            Hide();
+            var h = SettingsRequested;
+            if (h != null) h(this, EventArgs.Empty);
+        };
+        Controls.Add(_settings);
+
+        _quit = new FluentButton();
+        _quit.Quiet = true;
+        _quit.Glyph = Fluent.IconPower;
+        _quit.Size = new Size(32, 32);
+        _quit.Click += (s, e) =>
+        {
+            var h = QuitRequested;
+            if (h != null) h(this, EventArgs.Empty);
+        };
+        Controls.Add(_quit);
+
+        var tips = new ToolTip();
+        tips.SetToolTip(_settings, "Settings");
+        tips.SetToolTip(_quit, "Quit Speaker Keeper");
+
+        Fluent.Follow(this, ApplyTheme);
+        ApplyTheme();
+        LayoutPanel();
+    }
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var cp = base.CreateParams;
+            cp.ExStyle |= 0x00000080;     // WS_EX_TOOLWINDOW: keep it out of Alt+Tab
+            cp.ClassStyle |= 0x00020000;  // CS_DROPSHADOW: a flyout needs to lift off the desktop
+            return cp;
+        }
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        Fluent.Borderless(this);
+    }
+
+    void ApplyTheme()
+    {
+        BackColor = Fluent.Card;
+        Fluent.Borderless(this);
+    }
+
+    void LayoutPanel()
+    {
+        int y = Pad + 52;                       // below the header block
+        _card = new Rectangle(Pad, y, W - Pad * 2, 52);
+        _keep.Location = new Point(_card.Right - 16 - _keep.Width, _card.Top + (_card.Height - _keep.Height) / 2);
+
+        int footerY = _card.Bottom + 12 + 12;   // divider sits midway
+        _quit.Location = new Point(W - Pad - _quit.Width, footerY);
+        _settings.Location = new Point(_quit.Left - 4 - _settings.Width, footerY);
+        ClientSize = new Size(W, footerY + _quit.Height + Pad);
+    }
+
+    /// <summary>Re-reads everything the panel shows. Cheap enough to call on every tick.</summary>
+    public void Bind(OutputStatus s)
+    {
+        _s = s;
+        _keep.SetSilently(s.Container == Guid.Empty || DevicePolicy.IsEnabled(s.Container));
+        _keep.Enabled = s.Bluetooth && s.Container != Guid.Empty;
+        _keep.Visible = _keep.Enabled;
+        Invalidate();
+    }
+
+    /// <summary>
+    /// True when the panel was open a moment ago.
+    ///
+    /// Clicking the tray icon deactivates the flyout, which hides it, and the click then
+    /// arrives here and would open it straight back up. Without this the icon could never
+    /// close what it opened.
+    /// </summary>
+    public bool JustClosed { get { return (DateTime.UtcNow - _closedAt).TotalMilliseconds < 300; } }
+
+    protected override void OnDeactivate(EventArgs e)
+    {
+        _closedAt = DateTime.UtcNow;
+        Hide();
+        base.OnDeactivate(e);
+    }
+
+    protected override bool ProcessCmdKey(ref Message m, Keys k)
+    {
+        if (k == Keys.Escape) { _closedAt = DateTime.UtcNow; Hide(); return true; }
+        return base.ProcessCmdKey(ref m, k);
+    }
+
+    /// <summary>Puts the panel against whichever screen edge the taskbar is on.</summary>
+    public void ShowNearTray()
+    {
+        LayoutPanel();
+        var screen = Screen.FromPoint(Cursor.Position);
+        Rectangle wa = screen.WorkingArea, all = screen.Bounds;
+        const int M = 12;
+
+        int x, y;
+        if (wa.Top > all.Top) { x = wa.Right - Width - M; y = wa.Top + M; }              // taskbar on top
+        else if (wa.Left > all.Left) { x = wa.Left + M; y = wa.Bottom - Height - M; }    // taskbar on the left
+        else { x = wa.Right - Width - M; y = wa.Bottom - Height - M; }                   // bottom, or right
+
+        Location = new Point(
+            Math.Max(wa.Left + 4, Math.Min(x, wa.Right - Width - 4)),
+            Math.Max(wa.Top + 4, Math.Min(y, wa.Bottom - Height - 4)));
+
+        Show();
+        Activate();
+    }
+
+    /// <summary>Closes the panel without disposing it, unlike Form.Close.</summary>
+    public void Dismiss()
+    {
+        _closedAt = DateTime.UtcNow;
+        Hide();
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        Fluent.Quality(g);
+        using (var b = new SolidBrush(Fluent.Card)) g.FillRectangle(b, ClientRectangle);
+
+        const TextFormatFlags left = TextFormatFlags.Left | TextFormatFlags.VerticalCenter
+                                   | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix
+                                   | TextFormatFlags.EndEllipsis;
+
+        // --- header: which speaker, and what the app is doing about it ---------------
+        string glyph = _s.Bluetooth ? Fluent.IconBluetooth : Fluent.IconVolume;
+        Fluent.Draw(g, glyph, Fluent.Glyphs, _s.KeepingAwake ? Fluent.Accent : Fluent.TextSecondary,
+            new Rectangle(Pad + 6, Pad, 24, 24), TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+
+        Fluent.Draw(g, _s.Name, Fluent.BodyStrong, Fluent.Text,
+            new Rectangle(Pad + 36, Pad, W - Pad * 2 - 36, 22), left);
+
+        // Just the state here; when there is a reason, the card below carries it, and
+        // printing it in both places reads like a stutter.
+        string status = _s.KeepingAwake ? "Keeping awake" : "Idle";
+        if (_s.Battery >= 0)
+            status += "  ·  " + _s.Battery + "%" + (string.IsNullOrEmpty(_s.Charge) ? "" : " " + _s.Charge);
+
+        Fluent.Draw(g, status, Fluent.Caption, Fluent.TextSecondary,
+            new Rectangle(Pad + 36, Pad + 22, W - Pad * 2 - 36, 18), left);
+
+        // --- the one control worth a click -------------------------------------------
+        Fluent.DrawRounded(g, _card, 4, Fluent.Subtle, Fluent.Stroke);
+        bool can = _keep.Enabled;
+        string cardText = can ? "Keep this speaker awake" : Sentence(_s.IdleReason);
+        Fluent.Draw(g, cardText, Fluent.Body, can ? Fluent.Text : Fluent.TextTertiary,
+            new Rectangle(_card.X + 16, _card.Y, _card.Width - 32 - (can ? 56 : 0), _card.Height), left);
+
+        // --- footer -------------------------------------------------------------------
+        int dy = _card.Bottom + 12;
+        using (var p = new Pen(Fluent.Divider)) g.DrawLine(p, Pad, dy, W - Pad, dy);
+
+        Fluent.Draw(g, "Speaker Keeper " + Project.ShortVersion, Fluent.Caption, Fluent.TextTertiary,
+            new Rectangle(Pad + 6, _settings.Top, W - Pad * 2 - 80, _settings.Height), left);
+    }
+
+    /// <summary>The policy's own wording, capitalised so it can stand on its own line.</summary>
+    static string Sentence(string reason)
+    {
+        if (string.IsNullOrEmpty(reason)) return "Not a Bluetooth speaker";
+        return char.ToUpperInvariant(reason[0]) + reason.Substring(1);
+    }
+}
+
+/// <summary>A page heading, painted so it follows the theme like everything else.</summary>
+class Heading : Control
+{
+    public bool Small { get; set; }
+
+    public Heading()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        Height = 34;
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        Fluent.Quality(e.Graphics);
+        Fluent.Draw(e.Graphics, Text, Small ? Fluent.BodyStrong : Fluent.Subtitle,
+            Small ? Fluent.TextSecondary : Fluent.Text, ClientRectangle,
+            TextFormatFlags.Left | TextFormatFlags.Bottom | TextFormatFlags.NoPrefix);
+    }
+}
+
+/// <summary>A paragraph of explanation between cards.</summary>
+class Note : Control
+{
+    /// <summary>Full-strength body text, for labelling a control rather than explaining one.</summary>
+    public bool Primary { get; set; }
+
+    Font Face { get { return Primary ? Fluent.Body : Fluent.Caption; } }
+
+    public Note()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        Height = 20;
+    }
+
+    /// <summary>
+    /// Grows to fit the wrapped text. Measured with the font it will actually paint with -
+    /// measuring body text as caption undercounts, and the last line is clipped away.
+    /// </summary>
+    public void FitHeight() { Height = Fluent.Measure(Text, Face, Math.Max(40, Width)).Height + 4; }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        Fluent.Quality(e.Graphics);
+        Fluent.Draw(e.Graphics, Text, Face,
+            Primary ? Fluent.Text : Fluent.TextSecondary, ClientRectangle,
+            TextFormatFlags.Left | (Primary ? TextFormatFlags.VerticalCenter : TextFormatFlags.Top)
+            | TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix);
+    }
+}
+
+/// <summary>
+/// A settings page: stacks whatever is put in it, full width, and scrolls if it has to.
+///
+/// The width is recomputed on every layout because AutoScroll takes the scrollbar out of
+/// ClientSize only once it decides one is needed, so a card sized before that would sit
+/// underneath it.
+/// </summary>
+class StackPage : Panel
+{
+    public int Gap = 6;
+
+    public StackPage()
+    {
+        AutoScroll = true;
+        Dock = DockStyle.Fill;
+        Padding = new Padding(28, 20, 28, 24);
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        Fluent.DarkScrollbars(this);
+    }
+
+    protected override void OnLayout(LayoutEventArgs e)
+    {
+        int w = ClientSize.Width - Padding.Horizontal;
+        if (w < 80) { base.OnLayout(e); return; }
+
+        int y = Padding.Top;
+        foreach (Control c in Controls)
+        {
+            if (!c.Visible) continue;
+            c.Left = Padding.Left;
+            c.Width = w;
+
+            var note = c as Note;
+            if (note != null) note.FitHeight();
+            var card = c as SettingsCard;
+            if (card != null) card.FitHeight();
+
+            c.Top = y;
+            y += c.Height + (c is Heading ? 4 : Gap);
+        }
+        base.OnLayout(e);
+    }
+}
+
+/// <summary>
+/// The settings window: a navigation rail and pages of cards, like the Settings app.
+///
+/// The old one was a single fixed dialog of checkboxes. This is the same set of
+/// settings, grouped, so the window says what each one does instead of relying on the
+/// user to infer it from a five-word label.
+/// </summary>
 class SettingsForm : Form
 {
     public event EventHandler SettingsChanged;
 
-    readonly CheckBox _runAtLogin, _warnLow, _autoUpdate;
-    readonly CheckedListBox _devices;
+    readonly Panel _rail;
+    readonly Panel _host;
+    readonly StackPage _general, _speakers, _about;
+    readonly List<NavItem> _nav = new List<NavItem>();
 
-    /// <summary>Row in the device list; ToString is what CheckedListBox renders.</summary>
-    class DeviceRow
-    {
-        public Guid Container;
-        public string Name;
-        public bool Present;
-        public override string ToString()
-        {
-            return Present ? Name : Name + "   (not connected)";
-        }
-    }
-    readonly NumericUpDown _threshold;
-    readonly Label _thresholdLabel;
+    readonly ToggleSwitch _runAtLogin, _warnLow, _autoUpdate;
+    readonly NumberStepper _threshold;
+    readonly SettingsCard _thresholdCard;
     readonly string _logPath, _dir;
     bool _loading;
 
@@ -997,194 +2285,292 @@ class SettingsForm : Form
         _logPath = logPath;
         _dir = dir;
 
-        Text = "Speaker Keeper Settings";
+        Text = "Speaker Keeper";
         Icon = icon;
-        FormBorderStyle = FormBorderStyle.FixedDialog;
-        MaximizeBox = false;
-        MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
         AutoScaleMode = AutoScaleMode.Dpi;
-        Font = SystemFonts.MessageBoxFont;
-        ClientSize = new Size(380, 490);
-        Padding = new Padding(16);
+        Font = Fluent.Body;
+        ClientSize = new Size(860, 560);
+        MinimumSize = new Size(680, 460);
+        DoubleBuffered = true;
 
-        int y = 16;
+        // --- pages -------------------------------------------------------------------
+        _host = new Panel();
+        _host.Dock = DockStyle.Fill;
+        Controls.Add(_host);
 
-        _runAtLogin = new CheckBox();
-        _runAtLogin.Text = "Start with Windows";
-        _runAtLogin.Location = new Point(16, y);
-        _runAtLogin.AutoSize = true;
-        _runAtLogin.CheckedChanged += (s, e) =>
+        _general = new StackPage();
+        _speakers = new StackPage();
+        _about = new StackPage();
+
+        _runAtLogin = new ToggleSwitch();
+        _runAtLogin.Toggled += (s, e) =>
         {
             if (_loading) return;
-            Settings.RunAtLogin = _runAtLogin.Checked;
+            Settings.RunAtLogin = _runAtLogin.On;
             Raise();
         };
-        Controls.Add(_runAtLogin);
-        y += 24;
 
-        var hint = new Label();
-        hint.Text = "Launches Speaker Keeper automatically when you sign in.";
-        hint.Location = new Point(34, y);
-        hint.AutoSize = false;
-        hint.Size = new Size(330, 18);
-        hint.ForeColor = SystemColors.GrayText;
-        Controls.Add(hint);
-        y += 32;
-
-        _warnLow = new CheckBox();
-        _warnLow.Text = "Notify me when the speaker battery is low";
-        _warnLow.Location = new Point(16, y);
-        _warnLow.AutoSize = true;
-        _warnLow.CheckedChanged += (s, e) =>
+        _warnLow = new ToggleSwitch();
+        _warnLow.Toggled += (s, e) =>
         {
             if (_loading) return;
-            Settings.WarnLowBattery = _warnLow.Checked;
+            Settings.WarnLowBattery = _warnLow.On;
             UpdateEnabled();
             Raise();
         };
-        Controls.Add(_warnLow);
-        y += 28;
 
-        _thresholdLabel = new Label();
-        _thresholdLabel.Text = "Warn below";
-        _thresholdLabel.Location = new Point(34, y + 3);
-        _thresholdLabel.AutoSize = true;
-        Controls.Add(_thresholdLabel);
-
-        _threshold = new NumericUpDown();
-        _threshold.Minimum = 5;
-        _threshold.Maximum = 95;
-        _threshold.Increment = 5;
-        _threshold.Location = new Point(114, y);
-        _threshold.Width = 60;
+        _threshold = new NumberStepper();
+        _threshold.Configure(5, 95, 5);
+        _threshold.Suffix = "%";
         _threshold.ValueChanged += (s, e) =>
         {
             if (_loading) return;
-            Settings.LowBatteryThreshold = (int)_threshold.Value;
+            Settings.LowBatteryThreshold = _threshold.Value;
             Raise();
         };
-        Controls.Add(_threshold);
 
-        var pct = new Label();
-        pct.Text = "%";
-        pct.Location = new Point(180, y + 3);
-        pct.AutoSize = true;
-        Controls.Add(pct);
-        y += 40;
+        _autoUpdate = new ToggleSwitch();
+        _autoUpdate.Toggled += (s, e) => OnAutoUpdateToggled();
 
-        _autoUpdate = new CheckBox();
-        _autoUpdate.Text = "Install updates automatically";
-        _autoUpdate.Location = new Point(16, y);
-        _autoUpdate.AutoSize = true;
-        _autoUpdate.CheckedChanged += (s, e) =>
-        {
-            if (_loading) return;
-            bool want = _autoUpdate.Checked;
-            // Machine-wide: creating the SYSTEM task raises one UAC prompt. If the user
-            // dismisses it, snap the checkbox back rather than lying about the state -
-            // and say why. Silently reverting looks identical to the setting not
-            // sticking, which is how someone ends up believing updates are on when the
-            // task was never created.
-            if (!Updater.SetAutoUpdateElevated(want))
-            {
-                _loading = true;
-                _autoUpdate.Checked = !want;
-                _loading = false;
-                MessageBox.Show(this,
-                    (want ? "Automatic updates were not turned on."
-                          : "Automatic updates were not turned off.")
-                    + "\n\nChanging this installs or removes a scheduled task that runs as "
-                    + "the system account, so Windows has to ask for permission. The "
-                    + "permission prompt was dismissed or refused, so nothing was changed.",
-                    "Speaker Keeper", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
-            }
-            ReloadFromSettings();
-            Raise();
-        };
-        Controls.Add(_autoUpdate);
-        y += 24;
+        _general.Controls.Add(Head("General"));
+        _general.Controls.Add(Card(Fluent.IconPower, "Start with Windows",
+            "Launches Speaker Keeper automatically when you sign in.", _runAtLogin));
+        _general.Controls.Add(Card(Fluent.IconWarning, "Warn me when the battery is low",
+            "Shows a notification once per discharge, not on every reading.", _warnLow));
+        _thresholdCard = Card("", "Warn below", null, _threshold);
+        _general.Controls.Add(_thresholdCard);
+        _general.Controls.Add(Card(Fluent.IconDownload, "Install updates automatically",
+            "Checks once a day and installs in the background. Needs administrator approval once, "
+            + "because it runs as a scheduled task under the system account.", _autoUpdate));
 
-        var updHint = new Label();
-        updHint.Text = "Checks daily. Needs admin once to turn on.";
-        updHint.Location = new Point(34, y);
-        updHint.AutoSize = false;
-        updHint.Size = new Size(330, 18);
-        updHint.ForeColor = SystemColors.GrayText;
-        Controls.Add(updHint);
-        y += 34;
+        _speakers.Controls.Add(Head("Speakers"));
+        var devNote = new Note();
+        devNote.Text = "Only Bluetooth speakers are listed. Wired and USB outputs never idle off, "
+                     + "and earbuds are left alone so holding them awake cannot drain them. "
+                     + "A speaker that is switched off stays here so you can still configure it.";
+        _speakers.Controls.Add(devNote);
 
-        var devLabel = new Label();
-        devLabel.Text = "Keep these speakers awake:";
-        devLabel.Location = new Point(16, y);
-        devLabel.AutoSize = true;
-        devLabel.Font = new Font(Font, FontStyle.Bold);
-        Controls.Add(devLabel);
-        y += 22;
+        _about.Controls.Add(Head("About"));
+        var version = Card(Fluent.IconInfo, "Speaker Keeper", "Version " + Project.ShortVersion, null);
+        version.SetAction(Button("What's new", false,
+            () => Project.Open(Project.ReleaseNotesUrl(Project.ShortVersion))));
+        _about.Controls.Add(version);
 
-        _devices = new CheckedListBox();
-        _devices.Location = new Point(16, y);
-        _devices.Size = new Size(348, 104);
-        _devices.CheckOnClick = true;
-        _devices.IntegralHeight = false;
-        _devices.ItemCheck += OnDeviceChecked;
-        Controls.Add(_devices);
-        y += 110;
+        var logCard = Card(Fluent.IconDocument, "Activity log",
+            "Every device change, stream start and failure, with timestamps.", null);
+        logCard.SetAction(Button("View log", false, ShowLog));
+        _about.Controls.Add(logCard);
 
-        var devHint = new Label();
-        devHint.Text = "Only Bluetooth outputs are listed - wired and USB devices never sleep.";
-        devHint.Location = new Point(16, y);
-        devHint.AutoSize = false;
-        devHint.Size = new Size(348, 30);
-        devHint.ForeColor = SystemColors.GrayText;
-        Controls.Add(devHint);
-        y += 36;
+        var folderCard = Card(Fluent.IconFolder, "Installation folder", _dir, null);
+        folderCard.SetAction(Button("Open folder", false, () => OpenPath(_dir)));
+        _about.Controls.Add(folderCard);
 
-        var openLog = new Button();
-        openLog.Text = "View log";
-        openLog.Location = new Point(16, y);
-        openLog.Size = new Size(110, 30);
-        openLog.Click += (s, e) => ShowLog();
-        Controls.Add(openLog);
+        var repoCard = Card(Fluent.IconBluetooth, "Project page",
+            "Source, releases and how it works.", null);
+        repoCard.SetAction(Button("Open on GitHub", false, () => Project.Open(Project.Repo)));
+        _about.Controls.Add(repoCard);
 
-        var openFolder = new Button();
-        openFolder.Text = "Open folder";
-        openFolder.Location = new Point(134, y);
-        openFolder.Size = new Size(110, 30);
-        openFolder.Click += (s, e) => OpenPath(_dir);
-        Controls.Add(openFolder);
+        _host.Controls.Add(_general);
+        _host.Controls.Add(_speakers);
+        _host.Controls.Add(_about);
 
-        var close = new Button();
-        close.Text = "Close";
-        close.Location = new Point(262, y);
-        close.Size = new Size(100, 30);
-        close.Click += (s, e) => Close();
-        Controls.Add(close);
+        // --- rail --------------------------------------------------------------------
+        // Added after the pages so docking puts it to their left rather than over them.
+        _rail = new Panel();
+        _rail.Dock = DockStyle.Left;
+        _rail.Width = 196;
+        _rail.Padding = new Padding(8, 16, 8, 8);
+        Controls.Add(_rail);
 
-        AcceptButton = close;
-        CancelButton = close;
+        AddNav(Fluent.IconSettings, "General", _general);
+        AddNav(Fluent.IconVolume, "Speakers", _speakers);
+        AddNav(Fluent.IconInfo, "About", _about);
+        Select(0);
 
-        // Version footer. Auto-updates are silent, so this is the one place a user can
-        // always find out which build they are actually running and what went into it -
-        // a toast can be missed or suppressed, this cannot.
-        y += 40;
-
-        var ver = new Label();
-        ver.Text = "Version " + Project.ShortVersion;
-        ver.Location = new Point(16, y);
-        ver.AutoSize = true;
-        ver.ForeColor = SystemColors.GrayText;
-        Controls.Add(ver);
-
-        var whatsNew = new LinkLabel();
-        whatsNew.Text = "What's new";
-        whatsNew.Location = new Point(16 + ver.PreferredWidth + 12, y);
-        whatsNew.AutoSize = true;
-        whatsNew.LinkClicked += (s, e) => Project.Open(Project.ReleaseNotesUrl(Project.ShortVersion));
-        Controls.Add(whatsNew);
-
+        Fluent.Follow(this, ApplyTheme);
+        ApplyTheme();
         ReloadFromSettings();
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        Fluent.Trim(this, false);
+    }
+
+    void ApplyTheme()
+    {
+        BackColor = Fluent.Window;
+        _rail.BackColor = Fluent.Window;
+        _host.BackColor = Fluent.Window;
+        _general.BackColor = Fluent.Window;
+        _speakers.BackColor = Fluent.Window;
+        _about.BackColor = Fluent.Window;
+        Fluent.Trim(this, false);
+    }
+
+    // --- building blocks -------------------------------------------------------------
+
+    static Heading Head(string text)
+    {
+        var h = new Heading();
+        h.Text = text;
+        return h;
+    }
+
+    static SettingsCard Card(string glyph, string title, string description, Control action)
+    {
+        var c = new SettingsCard();
+        c.Glyph = glyph;
+        c.Title = title;
+        c.Description = description;
+        if (action != null) c.SetAction(action);
+        return c;
+    }
+
+    static FluentButton Button(string text, bool primary, Action onClick)
+    {
+        var b = new FluentButton();
+        b.Text = text;
+        b.Primary = primary;
+        b.Size = new Size(Math.Max(104, TextRenderer.MeasureText(text, Fluent.Body).Width + 32), 32);
+        b.Click += (s, e) => onClick();
+        return b;
+    }
+
+    void AddNav(string glyph, string text, StackPage page)
+    {
+        var n = new NavItem();
+        n.Glyph = glyph;
+        n.Text = text;
+        n.Page = text;
+        n.Dock = DockStyle.Top;
+        n.Tag = page;
+        n.Click += (s, e) => Select(_nav.IndexOf((NavItem)s));
+        _nav.Add(n);
+        // Docked top stacks in reverse add order, so insert each one above the last.
+        _rail.Controls.Add(n);
+        _rail.Controls.SetChildIndex(n, 0);
+    }
+
+    void Select(int index)
+    {
+        for (int i = 0; i < _nav.Count; i++)
+        {
+            _nav[i].Selected = i == index;
+            var page = (StackPage)_nav[i].Tag;
+            page.Visible = i == index;
+            if (i == index) page.BringToFront();
+        }
+        if (index == 1) LoadDevices();
+    }
+
+    // --- settings --------------------------------------------------------------------
+
+    void OnAutoUpdateToggled()
+    {
+        if (_loading) return;
+        bool want = _autoUpdate.On;
+
+        // Machine-wide: creating the SYSTEM task raises one UAC prompt. If the user
+        // dismisses it, snap the switch back rather than lying about the state - and say
+        // why. Silently reverting looks identical to the setting not sticking, which is
+        // how someone ends up believing updates are on when the task was never created.
+        if (!Updater.SetAutoUpdateElevated(want))
+        {
+            _loading = true;
+            _autoUpdate.SetSilently(!want);
+            _loading = false;
+            MessageBox.Show(this,
+                (want ? "Automatic updates were not turned on."
+                      : "Automatic updates were not turned off.")
+                + "\n\nChanging this installs or removes a scheduled task that runs as "
+                + "the system account, so Windows has to ask for permission. The "
+                + "permission prompt was dismissed or refused, so nothing was changed.",
+                "Speaker Keeper", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        ReloadFromSettings();
+        Raise();
+    }
+
+    void UpdateEnabled()
+    {
+        _threshold.Enabled = _warnLow.On;
+        _thresholdCard.Muted = !_warnLow.On;
+        _thresholdCard.Invalidate();
+    }
+
+    /// <summary>
+    /// Bluetooth outputs that are connected now, plus any seen before, so a speaker that
+    /// is currently switched off can still be configured.
+    /// </summary>
+    void LoadDevices()
+    {
+        // Everything after the heading and the note is a device row from last time.
+        for (int i = _speakers.Controls.Count - 1; i >= 2; i--)
+        {
+            var c = _speakers.Controls[i];
+            _speakers.Controls.RemoveAt(i);
+            c.Dispose();
+        }
+
+        var seen = new HashSet<Guid>();
+        var rows = new List<SettingsCard>();
+        try
+        {
+            // Name rows after the physical Bluetooth device, not the audio endpoint: one
+            // speaker exposes both "Speakers (X)" and "Headset Earphone (X Hands-Free)".
+            var btNames = DeviceProps.BluetoothDevices();
+
+            foreach (var d in DeviceProps.RenderEndpoints())
+            {
+                if (!d.IsBluetooth || d.Container == Guid.Empty) continue;
+                if (!seen.Add(d.Container)) continue;
+
+                string name;
+                if (!btNames.TryGetValue(d.Container, out name) || string.IsNullOrEmpty(name))
+                    name = d.Name;
+
+                DevicePolicy.Remember(d.Container, name);
+                rows.Add(DeviceRow(d.Container, name, true));
+            }
+
+            foreach (var r in DevicePolicy.All())
+            {
+                if (!seen.Add(r.Container)) continue;
+                rows.Add(DeviceRow(r.Container, r.Name, false));
+            }
+        }
+        catch { }
+
+        if (rows.Count == 0)
+        {
+            var empty = Card(Fluent.IconBluetooth, "No Bluetooth speakers found",
+                "Pair a speaker and connect it, then come back here.", null);
+            empty.Muted = true;
+            rows.Add(empty);
+        }
+
+        foreach (var r in rows) _speakers.Controls.Add(r);
+        _speakers.PerformLayout();
+    }
+
+    SettingsCard DeviceRow(Guid container, string name, bool present)
+    {
+        var toggle = new ToggleSwitch();
+        toggle.SetSilently(DevicePolicy.IsEnabled(container));
+        toggle.Toggled += (s, e) =>
+        {
+            DevicePolicy.SetEnabled(container, name, toggle.On);
+            // Let the tray re-evaluate straight away rather than waiting for the next tick.
+            BeginInvoke(new Action(Raise));
+        };
+        var card = Card(Fluent.IconVolume, name,
+            present ? "Connected" : "Not connected right now", toggle);
+        card.Muted = !present;
+        return card;
     }
 
     LogWindow _log;
@@ -1213,78 +2599,18 @@ class SettingsForm : Form
         if (h != null) h(this, EventArgs.Empty);
     }
 
-    void UpdateEnabled()
-    {
-        _threshold.Enabled = _warnLow.Checked;
-        _thresholdLabel.Enabled = _warnLow.Checked;
-    }
-
-    void OnDeviceChecked(object sender, ItemCheckEventArgs e)
-    {
-        if (_loading) return;
-        var row = _devices.Items[e.Index] as DeviceRow;
-        if (row == null) return;
-        DevicePolicy.SetEnabled(row.Container, row.Name, e.NewValue == CheckState.Checked);
-        // Let the tray re-evaluate straight away rather than waiting for the next tick.
-        BeginInvoke(new Action(Raise));
-    }
-
-    /// <summary>
-    /// Bluetooth outputs that are connected now, plus any we've seen before so a speaker
-    /// that is currently switched off can still be configured.
-    /// </summary>
-    void LoadDevices()
-    {
-        _devices.Items.Clear();
-
-        var seen = new HashSet<Guid>();
-        try
-        {
-            // Name rows after the physical Bluetooth device, not the audio endpoint: one
-            // speaker exposes both "Speakers (X)" and "Headset Earphone (X Hands-Free)".
-            var btNames = DeviceProps.BluetoothDevices();
-
-            foreach (var d in DeviceProps.RenderEndpoints())
-            {
-                if (!d.IsBluetooth || d.Container == Guid.Empty) continue;
-                if (!seen.Add(d.Container)) continue;
-
-                string name;
-                if (!btNames.TryGetValue(d.Container, out name) || string.IsNullOrEmpty(name))
-                    name = d.Name;
-
-                DevicePolicy.Remember(d.Container, name);
-                _devices.Items.Add(
-                    new DeviceRow { Container = d.Container, Name = name, Present = true },
-                    DevicePolicy.IsEnabled(d.Container));
-            }
-
-            foreach (var r in DevicePolicy.All())
-            {
-                if (!seen.Add(r.Container)) continue;
-                _devices.Items.Add(
-                    new DeviceRow { Container = r.Container, Name = r.Name, Present = false },
-                    r.Enabled);
-            }
-        }
-        catch { }
-
-        if (_devices.Items.Count == 0)
-            _devices.Items.Add(new DeviceRow { Name = "No Bluetooth speakers found", Present = true }, false);
-    }
-
-    /// <summary>Re-reads the stored values, for when the tray menu changed one behind our back.</summary>
+    /// <summary>Re-reads the stored values, for when something else changed one behind our back.</summary>
     public void ReloadFromSettings()
     {
         _loading = true;
         try
         {
-            _runAtLogin.Checked = Settings.RunAtLogin;
-            _warnLow.Checked = Settings.WarnLowBattery;
-            _threshold.Value = Settings.LowBatteryThreshold;
-            _autoUpdate.Checked = Settings.AutoUpdate;
-            LoadDevices();
+            _runAtLogin.SetSilently(Settings.RunAtLogin);
+            _warnLow.SetSilently(Settings.WarnLowBattery);
+            _threshold.SetSilently(Settings.LowBatteryThreshold);
+            _autoUpdate.SetSilently(Settings.AutoUpdate);
             UpdateEnabled();
+            if (_speakers.Visible) LoadDevices();
         }
         finally { _loading = false; }
     }
@@ -1392,26 +2718,222 @@ static class DevicePolicy
     }
 }
 
+/// <summary>
+/// Holds a silent WASAPI render stream open on the default output. That stream is the
+/// whole keep-alive: a speaker idles off when nothing is being sent to it.
+///
+/// Rendering the silence directly is what keeps Speaker Keeper invisible. A media
+/// player publishes a transport session, so Windows puts a "Speaker Keeper" card with
+/// play/next/previous in the media flyout and hands it the user's media keys - controls
+/// for a track that does not exist. A raw render stream publishes nothing, and
+/// AUDCLNT_SESSIONFLAGS_DISPLAY_HIDE keeps its row out of the volume mixer as well.
+///
+/// One dedicated MTA thread owns the stream end to end. These interfaces are
+/// apartment-bound, so they must not be created on the WinForms STA thread and then
+/// fed from somewhere else.
+/// </summary>
+static class Silence
+{
+    const int ShareModeShared = 0;
+    const int ClsCtxAll = 23;
+
+    // DISPLAY_HIDE keeps the row out of the volume mixer; EXPIREWHENUNOWNED asks for the
+    // session to be retired once nothing holds it.
+    const int SessionFlags = 0x20000000 | 0x10000000;
+
+    // One session for the whole process, not one per stream.
+    //
+    // The audio engine keeps a session record alive for as long as its owning process
+    // runs, whatever the stream does and whatever EXPIREWHENUNOWNED asks for. A GUID per
+    // stream therefore left a dead session behind on every Bluetooth reconnect - hidden
+    // and silent, but one more of them every time, all day. Reusing one GUID means the
+    // first stream creates the session, which is what makes DISPLAY_HIDE stick, and every
+    // later stream rejoins that same already-hidden session.
+    //
+    // It is generated per launch rather than hard-coded so it can never collide with a
+    // session some other program created, which would be a visible one.
+    static readonly Guid SessionId = Guid.NewGuid();
+
+    const int BufferSilent = 0x2;           // AUDCLNT_BUFFERFLAGS_SILENT
+    const long BufferDuration = 20000000;   // 2 seconds, in 100ns units
+    const int FeedMs = 500;                 // top-up interval, well inside the buffer
+
+    enum State { Idle, Starting, Running, Failed }
+
+    static volatile State _state = State.Idle;
+    static Thread _thread;
+    static ManualResetEvent _stop;
+    static DateTime _startedAt;
+    static volatile string _error;
+
+    /// <summary>Why the last stream stopped, or null if it stopped because we said so.</summary>
+    public static string LastError { get { return _error; } }
+
+    /// <summary>
+    /// True while the stream is up, or still coming up. A start that never completes -
+    /// a wedged audio driver - stops counting as healthy, so the caller retries instead
+    /// of waiting forever on a stream that is never going to arrive.
+    /// </summary>
+    public static bool Active
+    {
+        get
+        {
+            var s = _state;
+            if (s == State.Running) return true;
+            return s == State.Starting && (DateTime.UtcNow - _startedAt).TotalSeconds < 30;
+        }
+    }
+
+    public static void Start()
+    {
+        Stop();
+        _error = null;
+        _startedAt = DateTime.UtcNow;
+        _state = State.Starting;
+        _stop = new ManualResetEvent(false);
+        _thread = new Thread(Run);
+        _thread.IsBackground = true;
+        _thread.Name = "Speaker Keeper silence";
+        _thread.SetApartmentState(ApartmentState.MTA);
+        _thread.Start();
+    }
+
+    public static void Stop()
+    {
+        var t = _thread;
+        if (t == null) { _state = State.Idle; return; }
+        _thread = null;
+        try { _stop.Set(); } catch { }
+
+        // Bounded: an audio driver that refuses to stop must not take the tray app
+        // down with it. The thread is a background thread, so a lost one dies at exit.
+        try { if (!t.Join(4000)) Program.Log("silence thread did not stop in time"); }
+        catch { }
+        _state = State.Idle;
+    }
+
+    static void Run()
+    {
+        IntPtr fmt = IntPtr.Zero;
+        object en = null, dev = null, client = null, render = null;
+        try
+        {
+            en = new MMDeviceEnumeratorClass();
+            IMMDevice endpoint;
+            if (((IMMDeviceEnumerator)en).GetDefaultAudioEndpoint(0, 0, out endpoint) != 0 || endpoint == null)
+            { Fail("no default output"); return; }
+            dev = endpoint;
+
+            var iid = typeof(IAudioClient).GUID;
+            object obj;
+            if (endpoint.Activate(ref iid, ClsCtxAll, IntPtr.Zero, out obj) != 0 || obj == null)
+            { Fail("cannot open the output"); return; }
+            client = obj;
+            var audio = (IAudioClient)obj;
+
+            int hr = audio.GetMixFormat(out fmt);
+            if (hr != 0) { Fail("mix format " + Hex(hr)); return; }
+
+            // The engine's own mix format, so the stream needs no conversion and no
+            // resampler - it is the cheapest thing that still counts as playback.
+            var session = SessionId;
+            hr = audio.Initialize(ShareModeShared, SessionFlags, BufferDuration, 0, fmt, ref session);
+            if (hr != 0) { Fail("initialize " + Hex(hr)); return; }
+
+            uint frames;
+            hr = audio.GetBufferSize(out frames);
+            if (hr != 0 || frames == 0) { Fail("buffer size " + Hex(hr)); return; }
+
+            var riid = typeof(IAudioRenderClient).GUID;
+            object svc;
+            hr = audio.GetService(ref riid, out svc);
+            if (hr != 0 || svc == null) { Fail("render client " + Hex(hr)); return; }
+            render = svc;
+            var buffer = (IAudioRenderClient)svc;
+
+            if (!Push(buffer, frames)) { Fail("could not fill the buffer"); return; }
+
+            hr = audio.Start();
+            if (hr != 0) { Fail("start " + Hex(hr)); return; }
+
+            _state = State.Running;
+            Program.Log("silent stream started (hidden session, no transport controls)");
+
+            while (!_stop.WaitOne(FeedMs))
+            {
+                uint pad;
+                hr = audio.GetCurrentPadding(out pad);
+                // The usual way out: the speaker disconnected or the endpoint was
+                // reconfigured, which invalidates the stream. The caller rebuilds.
+                if (hr != 0) { Fail("stream lost " + Hex(hr)); break; }
+                if (frames > pad && !Push(buffer, frames - pad))
+                { Fail("stream lost while writing"); break; }
+            }
+
+            try { audio.Stop(); } catch { }
+        }
+        catch (Exception ex) { Fail(ex.Message); }
+        finally
+        {
+            if (fmt != IntPtr.Zero) Marshal.FreeCoTaskMem(fmt);
+
+            // Every one of these, or the session outlives the stream. EXPIREWHENUNOWNED
+            // only retires a session once the last reference to it is gone, and a
+            // forgotten render client is enough to keep a dead session on the device -
+            // one more for every reconnect, for as long as the app runs.
+            Release(render);
+            Release(client);
+            Release(dev);
+            Release(en);
+
+            if (_state != State.Failed) _state = State.Idle;
+        }
+    }
+
+    /// <summary>
+    /// Hands the engine another block of silence. AUDCLNT_BUFFERFLAGS_SILENT means the
+    /// engine zeroes the buffer itself, so the mix format never has to be parsed.
+    /// </summary>
+    static bool Push(IAudioRenderClient render, uint frames)
+    {
+        IntPtr buf;
+        if (render.GetBuffer(frames, out buf) != 0) return false;
+        return render.ReleaseBuffer(frames, BufferSilent) == 0;
+    }
+
+    static void Release(object o)
+    {
+        if (o == null) return;
+        try { Marshal.FinalReleaseComObject(o); } catch { }
+    }
+
+    static void Fail(string why)
+    {
+        _error = why;
+        _state = State.Failed;
+        Program.Log("silent stream failed: " + why);
+    }
+
+    static string Hex(int hr) { return "0x" + hr.ToString("X8"); }
+}
+
 static class Program
 {
     // Read-only assets live next to the exe. The install folder is Program Files,
     // which standard users cannot write to, so anything we WRITE goes under
     // %LocalAppData% instead - otherwise the app breaks for non-admin users.
     static readonly string Dir = AppDomain.CurrentDomain.BaseDirectory;
-    static readonly string Wav = Path.Combine(Dir, "silent.wav");
     public static readonly string DataDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Speaker Keeper");
     static readonly string LogFile = Path.Combine(DataDir, "SpeakerKeeper.log");
 
-    static MediaPlayer _player;
-    static MediaSource _source;   // strong ref: without this the GC reclaims it and playback dies
     static string _lastDevice = "";
     static Mutex _mutex;
     static int _ticks;
 
     static NotifyIcon _tray;
     static ContextMenuStrip _menu;
-    static ToolStripMenuItem _deviceItem, _batteryItem, _statusItem, _startupItem;
+    static TrayFlyout _flyout;
     static SettingsForm _settings;
 
     // Latches so a low battery warns once per discharge, not every poll.
@@ -1443,7 +2965,7 @@ static class Program
 
     const long MaxLogBytes = 1024 * 1024;   // rotate at 1 MB, keep one previous file
 
-    static void Log(string m)
+    internal static void Log(string m)
     {
         try
         {
@@ -1533,7 +3055,7 @@ static class Program
         return true;
     }
 
-    /// <summary>Starts, sustains or stops the silent session to match the policy.</summary>
+    /// <summary>Starts, sustains or stops the silent stream to match the policy.</summary>
     static void ApplyPolicy(bool deviceChanged)
     {
         string reason;
@@ -1541,10 +3063,10 @@ static class Program
 
         if (!keep)
         {
-            if (_player != null)
+            if (Silence.Active)
             {
                 Log("stopping - " + reason);
-                StopPlayer();
+                Silence.Stop();
             }
             else if (_idleReason != reason)
             {
@@ -1555,80 +3077,13 @@ static class Program
         }
 
         _idleReason = null;
+        if (Silence.Active && !deviceChanged) return;
 
-        if (_player == null || deviceChanged)
-        {
-            StartPlayer();
-            return;
-        }
-
-        var st = _player.PlaybackSession.PlaybackState;
-        if (st != MediaPlaybackState.Playing &&
-            st != MediaPlaybackState.Opening &&
-            st != MediaPlaybackState.Buffering)
-        {
-            Log("state=" + st + " - reasserting play");
-            try { _player.Play(); } catch { }
-            if (_player.PlaybackSession.PlaybackState != MediaPlaybackState.Playing)
-            {
-                Log("still not playing - rebuilding");
-                StartPlayer();
-            }
-        }
-    }
-
-    static void StopPlayer()
-    {
-        try
-        {
-            if (_player != null)
-            {
-                try { _player.Pause(); } catch { }
-                try { _player.Dispose(); } catch { }
-            }
-        }
-        catch { }
-        _player = null;
-        _source = null;
-    }
-
-    static void StartPlayer()
-    {
-        try
-        {
-            if (_player != null)
-            {
-                try { _player.Pause(); } catch { }
-                try { _player.Dispose(); } catch { }
-            }
-
-            var p = new MediaPlayer();
-            _source = MediaSource.CreateFromUri(new Uri(Wav));   // absolute local path -> file URI
-            p.Source = _source;
-            p.IsLoopingEnabled = true;
-            p.Volume = 1.0;
-
-            // Register the media session (that is what keeps the speaker awake) but
-            // advertise NO transport controls, so Windows routes the user's media keys
-            // to their real player instead of to this silent track.
-            // NOTE: disabling Play AND Pause makes Windows drop the media session
-            // entirely - and that session is what keeps the speaker awake. So leave
-            // those at default and only suppress the navigation controls, which are
-            // the ones that would otherwise hijack next/previous keypresses.
-            var cm = p.CommandManager;
-            cm.NextBehavior.EnablingRule           = MediaCommandEnablingRule.Never;
-            cm.PreviousBehavior.EnablingRule       = MediaCommandEnablingRule.Never;
-            cm.FastForwardBehavior.EnablingRule    = MediaCommandEnablingRule.Never;
-            cm.RewindBehavior.EnablingRule         = MediaCommandEnablingRule.Never;
-            cm.PositionBehavior.EnablingRule       = MediaCommandEnablingRule.Never;
-            cm.ShuffleBehavior.EnablingRule        = MediaCommandEnablingRule.Never;
-            cm.AutoRepeatModeBehavior.EnablingRule = MediaCommandEnablingRule.Never;
-
-            p.Play();
-            _player = p;
-            Log("player started (silent loop, no transport controls)");
-        }
-        catch (Exception ex) { Log("start failed: " + ex.Message); }
+        // Read this before Start(), which clears it: a dropped Bluetooth link shows up
+        // here as the reason the stream died, and that is the one line worth logging.
+        string died = Silence.LastError;
+        if (died != null && !deviceChanged) Log("stream lost (" + died + ") - restarting");
+        Silence.Start();
     }
 
     static string IcoPath { get { return Path.Combine(Dir, "SpeakerKeeper.ico"); } }
@@ -1667,46 +3122,33 @@ static class Program
 
     static void BuildTray()
     {
-        _deviceItem = new ToolStripMenuItem("Output: -");
-        _deviceItem.Font = new Font(_deviceItem.Font, FontStyle.Bold);
-        _deviceItem.Click += (s, e) => RefreshMenu();
-
-        _batteryItem = new ToolStripMenuItem("Battery: -");
-        _batteryItem.Click += (s, e) => RefreshMenu();
-
-        _statusItem = new ToolStripMenuItem("Status: -");
-        _statusItem.Click += (s, e) => RefreshMenu();
-
-        _startupItem = new ToolStripMenuItem("Start with Windows");
-        _startupItem.CheckOnClick = true;
-        _startupItem.Click += (s, e) =>
-        {
-            Settings.RunAtLogin = _startupItem.Checked;
-            Log("start with Windows -> " + _startupItem.Checked);
-            if (_settings != null && !_settings.IsDisposed) _settings.ReloadFromSettings();
-        };
-
-        var settings = new ToolStripMenuItem("Settings...");
+        var settings = new ToolStripMenuItem("Settings");
         settings.Click += (s, e) => ShowSettings();
 
         var quit = new ToolStripMenuItem("Quit");
-        quit.Click += (s, e) =>
-        {
-            Log("quit requested from tray");
-            _tray.Visible = false;
-            Application.Exit();
-        };
+        quit.Click += (s, e) => QuitApp();
 
+        // The right-click menu is now only the two things the panel cannot be: a way in
+        // when the panel is already open, and a way out. Everything the old menu showed -
+        // output, battery, status - is on the panel, one click away.
         _menu = new ContextMenuStrip();
-        _menu.Items.Add(_deviceItem);
-        _menu.Items.Add(_batteryItem);
-        _menu.Items.Add(_statusItem);
-        _menu.Items.Add(new ToolStripSeparator());
-        _menu.Items.Add(_startupItem);
+        _menu.Renderer = new FluentMenuRenderer();
+        _menu.Font = Fluent.Body;
         _menu.Items.Add(settings);
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add(quit);
-        _menu.Opening += (s, e) => RefreshMenu();
+
+        _flyout = new TrayFlyout();
+        _flyout.SettingsRequested += (s, e) => ShowSettings();
+        _flyout.QuitRequested += (s, e) => QuitApp();
+        _flyout.PolicyChanged += (s, e) =>
+        {
+            // Act on the switch immediately; waiting for the next tick makes a toggle
+            // that takes five seconds to do anything look broken.
+            ApplyPolicy(false);
+            RefreshUi();
+            if (_settings != null && !_settings.IsDisposed) _settings.ReloadFromSettings();
+        };
 
         _tray = new NotifyIcon();
         _tray.Icon = TrayIcon();
@@ -1725,12 +3167,19 @@ static class Program
         };
         _tray.BalloonTipClosed += (s, e) => { _balloonClick = null; };
 
-        // Windows convention: double-clicking a tray icon opens the app's own window,
-        // while right-click gets the menu. Right-click is already handled by assigning
-        // ContextMenuStrip above.
-        _tray.MouseDoubleClick += (s, e) =>
+        // One click opens the panel, the way the system's own volume and brightness
+        // flyouts work. A double-click gesture would mean waiting to find out whether a
+        // second click is coming, and there is nothing else for it to mean here.
+        //
+        // Clicking the icon while the panel is open deactivates it, which hides it, and
+        // the click then arrives here - so a panel that was open a moment ago counts as
+        // open, otherwise the icon could never close what it opened.
+        _tray.MouseUp += (s, e) =>
         {
-            if (e.Button == MouseButtons.Left) ShowSettings();
+            if (e.Button != MouseButtons.Left) return;
+            if (_flyout.Visible || _flyout.JustClosed) { _flyout.Dismiss(); return; }
+            RefreshUi();
+            _flyout.ShowNearTray();
         };
 
         Application.ApplicationExit += (s, e) =>
@@ -1738,8 +3187,10 @@ static class Program
             try { _tray.Visible = false; _tray.Dispose(); } catch { }
         };
 
-        RefreshMenu();
-        Log("tray ready - " + _deviceItem.Text + ", " + _batteryItem.Text);
+        RefreshUi();
+        var st = Status();
+        Log("tray ready - " + st.Name + ", battery "
+            + (st.Battery >= 0 ? st.Battery + "%" : "not reported"));
 
         // Only once the tray icon exists - a balloon with no icon to anchor to is
         // silently dropped by the shell.
@@ -1818,37 +3269,73 @@ static class Program
             return;
         }
         _settings = new SettingsForm(WindowIcon(), LogFile, Dir);
-        _settings.SettingsChanged += (s, e) => RefreshMenu();
+        _settings.SettingsChanged += (s, e) =>
+        {
+            ApplyPolicy(false);
+            RefreshUi();
+        };
         _settings.Show();
     }
 
-    static void RefreshMenu()
+    static void QuitApp()
     {
+        Log("quit requested from tray");
+        Silence.Stop();
+        if (_flyout != null) _flyout.Dismiss();
+        _tray.Visible = false;
+        Application.Exit();
+    }
+
+    /// <summary>Everything the tray UI shows about the current output, read in one go.</summary>
+    static OutputStatus Status()
+    {
+        var s = new OutputStatus();
         try
         {
             string id = DefaultDeviceId();
             string name = string.IsNullOrEmpty(id) ? null : DeviceProps.EndpointName(id);
-            _deviceItem.Text = "Output: " + (string.IsNullOrEmpty(name) ? "unknown" : name);
+            s.Name = string.IsNullOrEmpty(name) ? "No output" : name;
 
-            int pct = string.IsNullOrEmpty(id) ? -1 : DeviceProps.BatteryPercent(id);
+            Guid container;
+            if (!string.IsNullOrEmpty(id) && DeviceProps.TryContainer(id, out container)
+                && container != Guid.Empty
+                && DeviceProps.BluetoothContainers().Contains(container))
+            {
+                s.Bluetooth = true;
+                s.Container = container;
+
+                // Show the speaker's own name rather than the endpoint's: one speaker
+                // exposes both "Speakers (X)" and "Headset Earphone (X Hands-Free)".
+                string bt;
+                if (DeviceProps.BluetoothDevices().TryGetValue(container, out bt)
+                    && !string.IsNullOrEmpty(bt)) s.Name = bt;
+            }
+
+            s.Battery = string.IsNullOrEmpty(id) ? -1 : DeviceProps.BatteryPercent(id);
             // "on charger" only when a rise was actually observed; a falling battery is
             // labelled as such rather than claimed to be unplugged.
-            string charge = _charge == Charge.Charging ? " (on charger)"
-                          : _charge == Charge.Draining ? " (draining)" : "";
-            _batteryItem.Text = pct >= 0 ? "Battery: " + pct + "%" + charge : "Battery: not reported";
+            s.Charge = _charge == Charge.Charging ? "on charger"
+                     : _charge == Charge.Draining ? "draining" : "";
+            s.KeepingAwake = Silence.Active;
+            s.IdleReason = _idleReason;
+        }
+        catch { }
+        return s;
+    }
 
-            _statusItem.Text = _player != null
-                ? "Status: keeping awake"
-                : "Status: idle" + (string.IsNullOrEmpty(_idleReason) ? "" : " - " + _idleReason);
-
-            _startupItem.Checked = Settings.RunAtLogin;
+    static void RefreshUi()
+    {
+        try
+        {
+            var st = Status();
+            if (_flyout != null) _flyout.Bind(st);
 
             // NotifyIcon.Text is capped at 63 characters, so keep the tooltip terse.
-            string tip = "Speaker Keeper" + (_player == null ? " - idle" : "")
-                       + (pct >= 0 ? " - " + pct + "%" : "");
+            string tip = "Speaker Keeper" + (st.KeepingAwake ? "" : " - idle")
+                       + (st.Battery >= 0 ? " - " + st.Battery + "%" : "");
             _tray.Text = tip.Length > 63 ? tip.Substring(0, 63) : tip;
         }
-        catch (Exception ex) { Log("menu refresh failed: " + ex.Message); }
+        catch (Exception ex) { Log("ui refresh failed: " + ex.Message); }
     }
 
     /// <summary>
@@ -1919,7 +3406,7 @@ static class Program
                 _lastBattery = pct;
                 _batteryAt = now;
                 _batteryStamp = reading.UpdatedAt;
-                RefreshMenu();
+                RefreshUi();
             }
 
             if (!Settings.WarnLowBattery || _lowWarned || pct > limit) return;
@@ -1965,6 +3452,9 @@ static class Program
         if (uninstall) { Installer.Uninstall(quiet); return; }
 
         bool created;
+        // The name is historical - it predates the move off the media session - but
+        // renaming it would let an old copy and a new one run side by side across an
+        // upgrade, each holding its own stream open.
         _mutex = new Mutex(true, "Local" + (char)92 + "SpeakerKeeperSMTC", out created);
         if (!created) return;   // already running
 
@@ -1992,7 +3482,7 @@ static class Program
                     Log("post-resume check - output is " + CurrentOutputName());
                     _lastDevice = DefaultDeviceId();
                     ApplyPolicy(true);
-                    RefreshMenu();
+                    RefreshUi();
                 };
                 resume.Start();
             }
@@ -2025,7 +3515,7 @@ static class Program
                 Log("default output changed -> " + CurrentOutputName());
                 _lastDevice = dev;
                 ApplyPolicy(true);
-                RefreshMenu();   // keep the tooltip pointing at the new device
+                RefreshUi();   // keep the tooltip pointing at the new device
             }
             else
             {
@@ -2038,9 +3528,9 @@ static class Program
                 CheckBattery();
 
             if (_ticks % 120 == 0)
-                Log("heartbeat " + (_player == null
-                        ? "idle - " + _idleReason
-                        : "state=" + _player.PlaybackSession.PlaybackState));
+                Log("heartbeat " + (Silence.Active
+                        ? "stream running"
+                        : "idle - " + (_idleReason ?? Silence.LastError ?? "stopped")));
         }
         catch (Exception ex) { Log("tick error: " + ex.Message); }
     }

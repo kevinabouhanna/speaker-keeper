@@ -13,6 +13,7 @@
 
 using System;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Reflection;
 using System.Threading;
@@ -75,10 +76,6 @@ static class SetupProgram
 /// <summary>
 /// The payload. Each file the app needs at runtime is compiled into this exe with
 /// /resource: and written out at install time.
-///
-/// silent.wav is the exception: it is 3.4 MB of pure digital silence, so embedding it
-/// would bloat the download by ~30x to carry nothing but zeros. It is generated instead,
-/// byte-for-byte identical to the file in the repo.
 /// </summary>
 static class Payload
 {
@@ -106,46 +103,6 @@ static class Payload
         var s = Assembly.GetExecutingAssembly().GetManifestResourceStream(name);
         if (s == null) throw new FileNotFoundException("missing embedded resource: " + name);
         return s;
-    }
-
-    /// <summary>
-    /// Writes silent.wav: 20 seconds of 44.1 kHz 16-bit stereo where every sample is zero.
-    ///
-    /// The keep-alive comes from holding a media *session* open, not from any sound, so
-    /// the audio only has to exist - it never has to be audible.
-    /// </summary>
-    public static void WriteSilentWav(string dir)
-    {
-        const int Rate = 44100, Channels = 2, Bits = 16, Seconds = 20;
-        int align = Channels * Bits / 8;
-        int bytes = Rate * align * Seconds;
-
-        using (var fs = File.Create(Path.Combine(dir, "silent.wav")))
-        using (var w = new BinaryWriter(fs))
-        {
-            w.Write(new char[] { 'R', 'I', 'F', 'F' });
-            w.Write(36 + bytes);
-            w.Write(new char[] { 'W', 'A', 'V', 'E' });
-            w.Write(new char[] { 'f', 'm', 't', ' ' });
-            w.Write(16);                          // PCM fmt chunk length
-            w.Write((short)1);                    // PCM
-            w.Write((short)Channels);
-            w.Write(Rate);
-            w.Write(Rate * align);                // byte rate
-            w.Write((short)align);
-            w.Write((short)Bits);
-            w.Write(new char[] { 'd', 'a', 't', 'a' });
-            w.Write(bytes);
-
-            // Written in chunks rather than one 3.4 MB allocation.
-            var zeros = new byte[64 * 1024];
-            for (int left = bytes; left > 0; )
-            {
-                int n = Math.Min(zeros.Length, left);
-                w.Write(zeros, 0, n);
-                left -= n;
-            }
-        }
     }
 }
 
@@ -181,10 +138,32 @@ static class SetupActions
     {
         get
         {
-            long total = 44 + (long)44100 * 4 * 20;     // silent.wav
+            long total = 0;
             foreach (var f in Payload.Files)
                 using (var s = Payload.Read(f)) total += s.Length;
             return total;
+        }
+    }
+
+    /// <summary>
+    /// Files earlier versions installed that nothing reads any more.
+    ///
+    /// Installing over an existing copy only overwrites what is being written, so
+    /// without this the 3.4 MB silent.wav that versions up to 1.2.1 wrote would sit in
+    /// Program Files forever on every machine that ever ran one of them.
+    /// </summary>
+    static readonly string[] Obsolete = { "silent.wav" };
+
+    static void RemoveObsolete(string target)
+    {
+        foreach (var name in Obsolete)
+        {
+            try
+            {
+                string f = Path.Combine(target, name);
+                if (File.Exists(f)) File.Delete(f);
+            }
+            catch { }   // a leftover file is not worth failing an install over
         }
     }
 
@@ -202,7 +181,6 @@ static class SetupActions
         report("Copying files...");
         Directory.CreateDirectory(target);
         foreach (var f in Payload.Files) Payload.Write(target, f);
-        Payload.WriteSilentWav(target);
 
         string exe = Path.Combine(target, "SpeakerKeeper.exe");
         string uninst = Path.Combine(target, "Uninstall.exe");
@@ -257,6 +235,7 @@ static class SetupActions
 
         report("Cleaning up...");
         CleanUpOldPerUserInstall(target);
+        RemoveObsolete(target);
 
         report("Done.");
         return warning;
@@ -369,24 +348,31 @@ static class SetupActions
 ///
 /// Pages are panels stacked in the same content area with one visible at a time, rather
 /// than separate forms, so the window never flickers or moves between steps.
+///
+/// It is drawn with the same Fluent parts as the app, and follows the same light or dark
+/// theme, because setup is the first thing anyone sees of Speaker Keeper and a grey 2001
+/// dialog would be a promise the app then doesn't keep.
 /// </summary>
 class SetupWizard : Form
 {
     const int PageWelcome = 0, PageLicense = 1, PageLocation = 2, PageProgress = 3, PageFinish = 4;
+    const int W = 500;   // usable width inside the content padding
 
     readonly Panel _content;
     readonly Panel[] _pages = new Panel[5];
-    readonly Button _back, _next, _cancel;
-    readonly Label _headTitle, _headSub;
+    readonly FluentButton _back, _next, _cancel;
     readonly Panel _header;
     readonly Image _logo;
 
-    CheckBox _accept, _autostart, _shortcut, _autoUpdate, _launch;
-    TextBox _path;
-    Label _spaceNote;
-    ProgressBar _bar;
-    Label _step;
-    Label _finishText;
+    string _headTitle = "", _headSub = "";
+
+    ToggleSwitch _accept, _autostart, _shortcut, _autoUpdate, _launch;
+    FluentTextBox _path;
+    Note _spaceNote;
+    FluentProgress _bar;
+    Note _step;
+    Note _finishText;
+    Note _launchLabel;
 
     int _page;
     bool _installed;
@@ -404,23 +390,30 @@ class SetupWizard : Form
         MaximizeBox = false;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
+        AutoScaleMode = AutoScaleMode.Dpi;
         // Tall enough that the welcome text, the version and the "click Next" line all
         // fit without the content panel clipping the last two.
-        ClientSize = new Size(520, 440);
-        Font = SystemFonts.MessageBoxFont;
-        BackColor = SystemColors.Control;
+        ClientSize = new Size(560, 480);
+        Font = Fluent.Body;
+        BackColor = Fluent.Window;
+        DoubleBuffered = true;
 
         // --- bottom button bar (added first; docking fills in reverse z-order) ---
         var bar = new Panel();
         bar.Dock = DockStyle.Bottom;
-        bar.Height = 56;
-        bar.BackColor = SystemColors.Control;
+        bar.Height = 64;
+        bar.BackColor = Fluent.Window;
+        bar.Paint += (s, e) =>
+        {
+            using (var p = new Pen(Fluent.Divider))
+                e.Graphics.DrawLine(p, 0, 0, bar.Width, 0);
+        };
 
-        _cancel = MakeButton("Cancel");
+        _cancel = MakeButton("Cancel", false);
         _cancel.Click += (s, e) => OnCancel();
-        _next = MakeButton("Next >");
+        _next = MakeButton("Next", true);
         _next.Click += (s, e) => OnNext();
-        _back = MakeButton("< Back");
+        _back = MakeButton("Back", false);
         _back.Click += (s, e) => Go(_page - 1);
 
         var flow = new FlowLayoutPanel();
@@ -428,56 +421,38 @@ class SetupWizard : Form
         flow.FlowDirection = FlowDirection.RightToLeft;
         flow.WrapContents = false;
         flow.AutoSize = true;
-        flow.Padding = new Padding(0, 12, 14, 0);
-        flow.Controls.Add(_cancel);     // right-to-left: rightmost is added first
-        flow.Controls.Add(_next);
+        flow.BackColor = Fluent.Window;
+        flow.Padding = new Padding(0, 16, 20, 0);
+        flow.Controls.Add(_next);       // right-to-left: rightmost is added first
+        flow.Controls.Add(_cancel);
         flow.Controls.Add(_back);
         bar.Controls.Add(flow);
-
-        var rule = new Panel();
-        rule.Dock = DockStyle.Top;
-        rule.Height = 1;
-        rule.BackColor = SystemColors.ControlDark;
-        bar.Controls.Add(rule);
 
         // --- header ---
         _header = new Panel();
         _header.Dock = DockStyle.Top;
-        _header.Height = 68;
-        _header.BackColor = Color.White;
-        _header.Paint += (s, e) =>
-        {
-            e.Graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
-            e.Graphics.DrawImage(_logo, new Rectangle(14, 10, 48, 48));
-            using (var p = new Pen(SystemColors.ControlDark))
-                e.Graphics.DrawLine(p, 0, _header.Height - 1, _header.Width, _header.Height - 1);
-        };
-
-        _headTitle = new Label();
-        _headTitle.Location = new Point(74, 14);
-        _headTitle.AutoSize = true;
-        _headTitle.Font = new Font(Font.FontFamily, Font.Size + 1.5f, FontStyle.Bold);
-        _headTitle.BackColor = Color.Transparent;
-        _header.Controls.Add(_headTitle);
-
-        _headSub = new Label();
-        _headSub.Location = new Point(76, 38);
-        _headSub.AutoSize = true;
-        _headSub.ForeColor = SystemColors.GrayText;
-        _headSub.BackColor = Color.Transparent;
-        _header.Controls.Add(_headSub);
+        _header.Height = 84;
+        _header.BackColor = Fluent.Card;
+        _header.Paint += PaintHeader;
 
         // --- content ---
         _content = new Panel();
         _content.Dock = DockStyle.Fill;
-        _content.Padding = new Padding(20, 16, 20, 8);
+        _content.BackColor = Fluent.Window;
+        _content.Padding = new Padding(28, 24, 28, 12);
 
         _pages[PageWelcome] = BuildWelcome();
         _pages[PageLicense] = BuildLicense();
         _pages[PageLocation] = BuildLocation();
         _pages[PageProgress] = BuildProgress();
         _pages[PageFinish] = BuildFinish();
-        foreach (var p in _pages) { p.Dock = DockStyle.Fill; p.Visible = false; _content.Controls.Add(p); }
+        foreach (var p in _pages)
+        {
+            p.Dock = DockStyle.Fill;
+            p.Visible = false;
+            p.BackColor = Fluent.Window;
+            _content.Controls.Add(p);
+        }
 
         Controls.Add(_content);
         Controls.Add(_header);
@@ -486,48 +461,99 @@ class SetupWizard : Form
         Go(PageWelcome);
     }
 
-    static Button MakeButton(string text)
+    protected override void OnHandleCreated(EventArgs e)
     {
-        var b = new Button();
+        base.OnHandleCreated(e);
+        Fluent.Trim(this, false);
+    }
+
+    void PaintHeader(object sender, PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        Fluent.Quality(g);
+        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+        using (var b = new SolidBrush(Fluent.Card)) g.FillRectangle(b, _header.ClientRectangle);
+        g.DrawImage(_logo, new Rectangle(28, 16, 52, 52));
+
+        Fluent.Draw(g, _headTitle, Fluent.Subtitle, Fluent.Text, new Rectangle(96, 18, _header.Width - 120, 28),
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+        Fluent.Draw(g, _headSub, Fluent.Caption, Fluent.TextSecondary, new Rectangle(96, 46, _header.Width - 120, 22),
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+
+        using (var p = new Pen(Fluent.Divider))
+            g.DrawLine(p, 0, _header.Height - 1, _header.Width, _header.Height - 1);
+    }
+
+    static FluentButton MakeButton(string text, bool primary)
+    {
+        var b = new FluentButton();
         b.Text = text;
-        b.Size = new Size(92, 30);
-        b.Margin = new Padding(6, 0, 0, 0);
+        b.Primary = primary;
+        b.Size = new Size(104, 32);
+        b.Margin = new Padding(8, 0, 0, 0);
         return b;
     }
 
-    static Label Para(string text, int y, int width)
+    /// <summary>
+    /// Adds a block below the last one and returns the next free y.
+    ///
+    /// The paragraphs on these pages wrap to whatever the text needs, so laying them out
+    /// at fixed offsets means the longest one silently runs under whatever follows it.
+    /// </summary>
+    static int Stack(Panel p, Control c, int y, int gap)
     {
-        var l = new Label();
-        l.Text = text;
-        l.Location = new Point(0, y);
-        l.AutoSize = true;
-        l.MaximumSize = new Size(width, 0);
-        return l;
+        c.Top = y;
+        p.Controls.Add(c);
+        return y + c.Height + gap;
+    }
+
+    /// <summary>A block of body text, sized to its own wrapped height.</summary>
+    static Note Para(string text, int y, int width, bool secondary)
+    {
+        var n = new Note();
+        n.Primary = !secondary;
+        n.Text = text;
+        n.SetBounds(0, y, width, 20);
+        n.FitHeight();
+        return n;
+    }
+
+    /// <summary>A card with a switch on it, matching the rows in the app's own settings.</summary>
+    SettingsCard Option(string glyph, string title, string description, int y, out ToggleSwitch toggle)
+    {
+        toggle = new ToggleSwitch();
+        toggle.SetSilently(true);
+        var c = new SettingsCard();
+        c.Glyph = glyph;
+        c.Title = title;
+        c.Description = description;
+        c.SetBounds(0, y, W, 56);
+        c.SetAction(toggle);
+        c.FitHeight();
+        return c;
     }
 
     Panel BuildWelcome()
     {
         var p = new Panel();
-        const int W = 460;
 
-        var h = Para("Welcome to Speaker Keeper", 4, W);
-        h.Font = new Font(Font.FontFamily, Font.Size + 3f, FontStyle.Regular);
-        p.Controls.Add(h);
+        var h = new Heading();
+        h.Text = "Welcome to Speaker Keeper";
+        h.SetBounds(0, 0, W, 34);
+        int y = Stack(p, h, 0, 12);
 
-        p.Controls.Add(Para(
+        y = Stack(p, Para(
             "Bluetooth speakers switch themselves off after a few minutes of quiet. That is "
             + "why the first second of your music keeps getting cut off, and why you sometimes "
             + "have to reconnect the speaker by hand.\r\n\r\n"
             + "Speaker Keeper quietly plays silence in the background, so your speaker never "
             + "nods off. You hear nothing - it simply stays awake, like a wired speaker.\r\n\r\n"
-            + "It sits in your system tray, shows your speaker's battery, and leaves your "
-            + "media keys alone.", 42, W));
+            + "It sits in your system tray and shows your speaker's battery. Windows never sees "
+            + "it: no media card, no volume mixer row, and your media keys keep working.",
+            0, W, false), y, 20);
 
-        var v = Para("Version " + SetupActions.Version, 224, W);
-        v.ForeColor = SystemColors.GrayText;
-        p.Controls.Add(v);
-
-        p.Controls.Add(Para("Click Next to continue.", 252, W));
+        y = Stack(p, Para("Version " + SetupActions.Version, 0, W, true), y, 8);
+        Stack(p, Para("Click Next to continue.", 0, W, false), y, 0);
         return p;
     }
 
@@ -535,11 +561,20 @@ class SetupWizard : Form
     {
         var p = new Panel();
 
+        var frame = new Panel();
+        frame.Dock = DockStyle.Fill;
+        frame.Padding = new Padding(1);
+        frame.BackColor = Fluent.Stroke;
+
         var box = new TextBox();
         box.Multiline = true;
         box.ReadOnly = true;
         box.ScrollBars = ScrollBars.Vertical;
-        box.BackColor = Color.White;       // ReadOnly renders grey otherwise
+        box.BorderStyle = BorderStyle.None;
+        // ReadOnly renders grey unless the colours are set explicitly.
+        box.BackColor = Fluent.Card;
+        box.ForeColor = Fluent.TextSecondary;
+        box.Font = Fluent.Caption;
         box.Dock = DockStyle.Fill;
         try
         {
@@ -549,20 +584,34 @@ class SetupWizard : Form
         }
         catch { box.Text = "MIT License"; }
         box.Select(0, 0);
+        box.HandleCreated += (s, e) => Fluent.DarkScrollbars(box);
+        frame.Controls.Add(box);
 
         var bottom = new Panel();
         bottom.Dock = DockStyle.Bottom;
-        bottom.Height = 34;
+        bottom.Height = 48;
+        bottom.BackColor = Fluent.Window;
 
-        _accept = new CheckBox();
-        _accept.Text = "I accept the terms of the licence";
-        _accept.AutoSize = true;
-        _accept.Location = new Point(0, 8);
-        // Nothing is installed until this is ticked, which is the point of the page.
-        _accept.CheckedChanged += (s, e) => _next.Enabled = _accept.Checked;
+        // Nothing is installed until this is on, which is the point of the page.
+        _accept = new ToggleSwitch();
+        _accept.SetSilently(false);
+        _accept.Location = new Point(0, 16);
+        _accept.Toggled += (s, e) => _next.Enabled = _accept.On;
         bottom.Controls.Add(_accept);
 
-        p.Controls.Add(box);
+        var label = new Note();
+        label.Primary = true;
+        label.Text = "I accept the terms of the licence";
+        label.SetBounds(_accept.Right + 12, 8, 320, 32);
+        bottom.Controls.Add(label);
+
+        var spacer = new Panel();
+        spacer.Dock = DockStyle.Bottom;
+        spacer.Height = 8;
+        spacer.BackColor = Fluent.Window;
+
+        p.Controls.Add(frame);
+        p.Controls.Add(spacer);
         p.Controls.Add(bottom);
         return p;
     }
@@ -570,21 +619,18 @@ class SetupWizard : Form
     Panel BuildLocation()
     {
         var p = new Panel();
-        const int W = 460;
 
-        p.Controls.Add(Para("Speaker Keeper will be installed in this folder.", 4, W));
+        p.Controls.Add(Para("Speaker Keeper will be installed in this folder.", 0, W, false));
 
-        _path = new TextBox();
-        _path.Location = new Point(0, 32);
-        _path.Width = 360;
+        _path = new FluentTextBox();
+        _path.SetBounds(0, 28, W - 116, 32);
         _path.Text = SetupActions.DefaultTarget;
-        _path.TextChanged += (s, e) => UpdateSpace();
+        _path.Inner.TextChanged += (s, e) => UpdateSpace();
         p.Controls.Add(_path);
 
-        var browse = new Button();
-        browse.Text = "Browse...";
-        browse.Size = new Size(92, 26);
-        browse.Location = new Point(368, 31);
+        var browse = new FluentButton();
+        browse.Text = "Browse";
+        browse.SetBounds(W - 104, 28, 104, 32);
         browse.Click += (s, e) =>
         {
             using (var d = new FolderBrowserDialog())
@@ -596,41 +642,21 @@ class SetupWizard : Form
         };
         p.Controls.Add(browse);
 
-        _spaceNote = Para("", 62, W);
-        _spaceNote.ForeColor = SystemColors.GrayText;
+        _spaceNote = Para("", 68, W, true);
         p.Controls.Add(_spaceNote);
 
-        _shortcut = new CheckBox();
-        _shortcut.Text = "Add a Start Menu shortcut";
-        _shortcut.AutoSize = true;
-        _shortcut.Checked = true;
-        _shortcut.Location = new Point(0, 100);
-        p.Controls.Add(_shortcut);
-
-        _autostart = new CheckBox();
-        _autostart.Text = "Start Speaker Keeper when I sign in";
-        _autostart.AutoSize = true;
-        _autostart.Checked = true;
-        _autostart.Location = new Point(0, 124);
-        p.Controls.Add(_autostart);
+        p.Controls.Add(Option(Fluent.IconFolder, "Add a Start Menu shortcut", null, 100, out _shortcut));
+        p.Controls.Add(Option(Fluent.IconPower, "Start Speaker Keeper when I sign in", null, 160, out _autostart));
 
         // Offered here because setup is already elevated: creating the SYSTEM update
         // task costs nothing extra now, whereas turning it on later from Settings needs
         // its own UAC prompt. That prompt is easy to dismiss, and dismissing it silently
-        // reverts the checkbox - so most people who meant to enable updates never did.
-        _autoUpdate = new CheckBox();
-        _autoUpdate.Text = "Install updates automatically";
-        _autoUpdate.AutoSize = true;
-        _autoUpdate.Checked = true;
-        _autoUpdate.Location = new Point(0, 148);
-        p.Controls.Add(_autoUpdate);
-
-        var note = Para(
+        // reverts the switch - so most people who meant to enable updates never did.
+        p.Controls.Add(Option(Fluent.IconDownload, "Install updates automatically",
             "Checks once a day in the background. Speaker Keeper is not code-signed, so "
-            + "updates are verified by checksum over HTTPS. All three can be changed later "
-            + "from the tray menu and Settings.", 176, W);
-        note.ForeColor = SystemColors.GrayText;
-        p.Controls.Add(note);
+            + "updates are verified by checksum over HTTPS.", 220, out _autoUpdate));
+
+        p.Controls.Add(Para("All three can be changed later from Settings.", 300, W, true));
 
         UpdateSpace();
         return p;
@@ -641,7 +667,7 @@ class SetupWizard : Form
         try
         {
             long need = SetupActions.EstimatedBytes;
-            string text = "Space required: " + (need / 1024 / 1024) + " MB";
+            string text = "Space required: " + Math.Max(1, need / 1024 / 1024) + " MB";
             var root = Path.GetPathRoot(_path.Text);
             if (!string.IsNullOrEmpty(root))
             {
@@ -651,6 +677,8 @@ class SetupWizard : Form
                             (di.AvailableFreeSpace / 1024 / 1024 / 1024) + " GB";
             }
             _spaceNote.Text = text;
+            _spaceNote.FitHeight();
+            _spaceNote.Invalidate();
         }
         catch { _spaceNote.Text = ""; }
     }
@@ -658,19 +686,14 @@ class SetupWizard : Form
     Panel BuildProgress()
     {
         var p = new Panel();
-        const int W = 460;
 
-        p.Controls.Add(Para("Please wait while Speaker Keeper is installed.", 4, W));
+        p.Controls.Add(Para("Please wait while Speaker Keeper is installed.", 0, W, false));
 
-        _bar = new ProgressBar();
-        _bar.Location = new Point(0, 40);
-        _bar.Size = new Size(W, 22);
-        _bar.Style = ProgressBarStyle.Continuous;
-        _bar.Maximum = 100;
+        _bar = new FluentProgress();
+        _bar.SetBounds(0, 44, W, 12);
         p.Controls.Add(_bar);
 
-        _step = Para("", 72, W);
-        _step.ForeColor = SystemColors.GrayText;
+        _step = Para("", 68, W, true);
         p.Controls.Add(_step);
         return p;
     }
@@ -678,22 +701,41 @@ class SetupWizard : Form
     Panel BuildFinish()
     {
         var p = new Panel();
-        const int W = 460;
 
-        var h = Para("Speaker Keeper is installed", 4, W);
-        h.Font = new Font(Font.FontFamily, Font.Size + 3f, FontStyle.Regular);
-        p.Controls.Add(h);
+        var h = new Heading();
+        h.Text = "Speaker Keeper is installed";
+        h.SetBounds(0, 0, W, 34);
+        Stack(p, h, 0, 12);
 
-        _finishText = Para("", 42, W);
+        _finishText = Para("", 46, W, false);
         p.Controls.Add(_finishText);
 
-        _launch = new CheckBox();
-        _launch.Text = "Launch Speaker Keeper now";
-        _launch.AutoSize = true;
-        _launch.Checked = true;
-        _launch.Location = new Point(0, 190);
+        _launch = new ToggleSwitch();
+        _launch.SetSilently(true);
         p.Controls.Add(_launch);
+
+        _launchLabel = new Note();
+        _launchLabel.Primary = true;
+        _launchLabel.Text = "Launch Speaker Keeper now";
+        _launchLabel.Width = 320;
+        p.Controls.Add(_launchLabel);
+
+        LayoutFinish();
         return p;
+    }
+
+    /// <summary>The launch switch sits under the message, whose length isn't known until then.</summary>
+    void LayoutFinish()
+    {
+        _finishText.FitHeight();
+        int y = _finishText.Bottom + 24;
+        _launch.Location = new Point(0, y + 6);
+        _launchLabel.SetBounds(_launch.Right + 12, y, 320, 32);
+
+        // Controls added later sit lower in the z-order, and the message grows over
+        // where these started out, so without this the switch ends up behind the text.
+        _launch.BringToFront();
+        _launchLabel.BringToFront();
     }
 
     void Go(int page)
@@ -704,30 +746,30 @@ class SetupWizard : Form
         switch (page)
         {
             case PageWelcome:
-                _headTitle.Text = "Speaker Keeper";
-                _headSub.Text = "Keep your Bluetooth speaker awake";
-                _back.Enabled = false; _next.Enabled = true; _next.Text = "Next >";
+                _headTitle = "Speaker Keeper";
+                _headSub = "Keep your Bluetooth speaker awake";
+                _back.Enabled = false; _next.Enabled = true; _next.Text = "Next";
                 _cancel.Enabled = true;
                 break;
             case PageLicense:
-                _headTitle.Text = "Licence";
-                _headSub.Text = "Speaker Keeper is free and open source";
-                _back.Enabled = true; _next.Enabled = _accept.Checked; _next.Text = "Next >";
+                _headTitle = "Licence";
+                _headSub = "Speaker Keeper is free and open source";
+                _back.Enabled = true; _next.Enabled = _accept.On; _next.Text = "Next";
                 break;
             case PageLocation:
-                _headTitle.Text = "Install location";
-                _headSub.Text = "Choose where to install, and how it starts";
+                _headTitle = "Install location";
+                _headSub = "Choose where to install, and how it starts";
                 _back.Enabled = true; _next.Enabled = true; _next.Text = "Install";
                 UpdateSpace();
                 break;
             case PageProgress:
-                _headTitle.Text = "Installing";
-                _headSub.Text = "This only takes a moment";
+                _headTitle = "Installing";
+                _headSub = "This only takes a moment";
                 _back.Enabled = false; _next.Enabled = false; _cancel.Enabled = false;
                 break;
             case PageFinish:
-                _headTitle.Text = _error == null ? "Finished" : "Setup failed";
-                _headSub.Text = _error == null
+                _headTitle = _error == null ? "Finished" : "Setup failed";
+                _headSub = _error == null
                     ? "Speaker Keeper is ready to use"
                     : "Nothing was installed";
                 _back.Enabled = false; _next.Enabled = true; _next.Text = "Finish";
@@ -735,6 +777,7 @@ class SetupWizard : Form
                 break;
         }
         _header.Invalidate();
+        _back.Invalidate(); _next.Invalidate(); _cancel.Invalidate();
     }
 
     void OnNext()
@@ -762,12 +805,12 @@ class SetupWizard : Form
             return;
         }
 
-        bool autostart = _autostart.Checked, shortcut = _shortcut.Checked;
-        bool autoUpdate = _autoUpdate.Checked;
+        bool autostart = _autostart.On, shortcut = _shortcut.On;
+        bool autoUpdate = _autoUpdate.On;
         Go(PageProgress);
 
-        // On a worker thread so the window keeps repainting; writing silent.wav alone is
-        // 3.4 MB, and a frozen installer looks like a crashed one.
+        // On a worker thread so the window keeps repainting: the install stops a running
+        // copy and waits on it, and a frozen installer looks like a crashed one.
         var t = new Thread(delegate ()
         {
             int done = 0;
@@ -779,7 +822,7 @@ class SetupWizard : Form
                     {
                         done += 14;
                         int d = Math.Min(done, 100);
-                        try { BeginInvoke((MethodInvoker)delegate { _step.Text = msg; _bar.Value = d; }); }
+                        try { BeginInvoke((MethodInvoker)delegate { _step.Text = msg; _step.Invalidate(); _bar.Value = d; }); }
                         catch { }
                     });
             }
@@ -791,14 +834,16 @@ class SetupWizard : Form
                 {
                     _bar.Value = 100;
                     _installed = _error == null;
-                    string ok = "Speaker Keeper is in your system tray. Hover it to see your "
-                              + "speaker and its battery, right-click it for the menu, or "
-                              + "double-click it to open Settings.\r\n\r\n"
+                    string ok = "Speaker Keeper is in your system tray. Click it once for the "
+                              + "panel - your speaker, its battery, and a switch to turn it off "
+                              + "for that speaker - or use the cog there to open Settings.\r\n\r\n"
                               + "Installed to:\r\n" + target;
                     // A warning means it IS installed, so it must not read as a failure.
                     if (warning != null) ok = warning + "\r\n\r\nInstalled to:\r\n" + target;
                     _finishText.Text = _error == null ? ok : "Setup could not complete:\r\n\r\n" + _error;
-                    if (_error != null) _launch.Visible = false;
+                    LayoutFinish();
+                    _finishText.Invalidate();
+                    if (_error != null) { _launch.Visible = false; _launchLabel.Visible = false; }
                     Go(PageFinish);
                 });
             }
@@ -811,7 +856,7 @@ class SetupWizard : Form
 
     void Finish()
     {
-        if (_installed && _launch.Visible && _launch.Checked)
+        if (_installed && _launch.Visible && _launch.On)
             SetupActions.LaunchAsUser(Path.Combine(_path.Text.Trim(), "SpeakerKeeper.exe"));
         Close();
     }

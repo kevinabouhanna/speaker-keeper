@@ -5,38 +5,91 @@ like a wired speaker that's simply always on.
 
 ## How it works
 
-Bluetooth speakers idle-off when no audio stream is present. Speaker Keeper holds a
-real Windows media session open: it loops `silent.wav` through a WinRT `MediaPlayer`,
-which keeps an audio stream alive on the default output endpoint without making a sound.
+Bluetooth speakers idle-off when no audio stream is present. Speaker Keeper opens a
+WASAPI render stream on the default output endpoint and feeds it digital silence, so the
+A2DP link stays up without a sound being made.
 
-Two details matter:
+Three details matter:
 
-- **Transport controls are suppressed.** The session registers with SMTC (that's what
-  keeps the speaker awake), but next/previous/seek/shuffle/repeat are disabled so your
-  media keys still reach Spotify, YouTube, etc. Play and Pause are deliberately left at
-  their defaults — disabling those makes Windows drop the session entirely, which defeats
-  the whole point.
+- **It is invisible to Windows' own audio UI.** The silence is rendered directly through
+  `IAudioClient`/`IAudioRenderClient` rather than played by a media player, because a
+  media player publishes a transport session — which is why earlier versions put a
+  phantom "Speaker Keeper" card with play/next/previous in the media flyout and swallowed
+  media keypresses. A raw render stream publishes nothing. The stream is initialised with
+  `AUDCLNT_SESSIONFLAGS_DISPLAY_HIDE`, which also keeps its row out of the volume mixer.
+  One session GUID is generated per launch and reused by every stream: the flag is only
+  honoured for a session `Initialize` itself creates, and the audio engine keeps a
+  session record for as long as the process runs, so a GUID per stream would leave a
+  dead session behind on every Bluetooth reconnect.
+- **The stream lives on its own MTA thread.** WASAPI's interfaces are apartment-bound, so
+  one dedicated thread creates the stream, tops it up with silence every 500 ms into a
+  2-second buffer, and tears it down. The WinForms thread only starts and stops it.
 - **It follows the default output device.** A 5-second timer polls the default endpoint
-  via `IMMDeviceEnumerator` and rebuilds the player when you switch outputs, and also
-  reasserts playback if anything stops it.
+  via `IMMDeviceEnumerator` and rebuilds the stream when you switch outputs. A dropped
+  Bluetooth link invalidates the stream, which surfaces as an error on the next top-up
+  and gets rebuilt the same way.
 
-A named mutex (`Local\SpeakerKeeperSMTC`) prevents a second instance.
+A named mutex (`Local\SpeakerKeeperSMTC`) prevents a second instance. The name is
+historical — it predates the move off the media session.
 
-## Tray icon
+## Tray icon and the flyout
 
 Speaker Keeper sits in the notification area.
 
-- **Double-click** opens Settings — the usual Windows convention for a tray app.
-- **Right-click** opens the menu:
-  - **Output** — the current default playback device
-  - **Battery** — charge level of that device (`(charging)` if rising), or `not reported`
-  - **Status** — `keeping awake`, or `idle` with the reason
-  - **Start with Windows** — toggles the autostart entry
-  - **Settings…** — low-battery warning, per-speaker control, live log, updates
-  - **Quit** — stops the silent loop and exits, letting the speaker idle off normally
+- **One left-click** opens `TrayFlyout`: a borderless, rounded panel anchored to whichever
+  screen edge the taskbar is on. It carries the output name, `Keeping awake` or `Idle`,
+  the battery, a switch for that speaker, and buttons for Settings and Quit. It closes on
+  deactivate, on Escape, and on a second click of the icon.
+- **Right-click** gets a two-item menu: **Settings** and **Quit**. Everything the old menu
+  listed is on the flyout now.
+- **Hover** shows the tooltip, which is still the terse one — `NotifyIcon.Text` is capped
+  at 63 characters.
 
-Both readings refresh whenever the menu opens, and the tooltip shows the battery level
-on hover. Clicking either row forces a re-read.
+There is deliberately no double-click gesture. A double-click means waiting to find out
+whether a second click is coming, and a background app has nothing for it to mean.
+
+The one subtlety is closing: clicking the icon while the panel is open deactivates the
+panel, which hides it, and *then* the click arrives at the icon — so the icon would
+reopen what the user just closed. `TrayFlyout.JustClosed` treats a panel that was open
+within the last 300 ms as still open, which makes the icon a toggle.
+
+## Drawing the Windows 11 look
+
+WinForms hands out Win32 common controls with a hard-coded light palette and no theme to
+switch to, so every surface is painted instead. `Fluent` holds the palette, the type ramp
+and the DWM calls; `ToggleSwitch`, `FluentButton`, `NumberStepper`, `SettingsCard`,
+`NavItem` and `Heading` are the drawn controls; `StackPage` stacks cards down a settings
+page. Nothing caches a colour — every control reads `Fluent` as it paints — so a theme
+switch is one `Invalidate`.
+
+Three things come from the system rather than being chosen:
+
+- **Light or dark**, from `AppsUseLightTheme`, with `SystemEvents.UserPreferenceChanged`
+  repainting on a switch.
+- **The accent colour**, from `AccentPalette` under `…\Explorer\Accent`. It is eight RGBA
+  entries running light to dark. Dark mode reads `AccentLight2` and light mode reads the
+  accent itself, because the same blue at full strength is unreadable on a dark surface.
+- **Rounded corners and the dark titlebar**, from `DwmSetWindowAttribute`. Every one of
+  those attributes is version-gated; an older Windows rejects the call and the window
+  simply keeps the frame it would have had.
+
+Scrollbars are the exception: they belong to the native control, so `SetWindowTheme(h,
+"DarkMode_Explorer", null)` asks for the dark ones. It is a request, and where Windows
+declines, the bars stay light.
+
+The setup wizard is drawn with the same parts, so the first thing anyone sees of Speaker
+Keeper is not a grey dialog the app then fails to resemble.
+
+A theme switch arrives as `UserPreferenceChanged`, which **SystemEvents raises on its own
+thread, not the UI one**. `Fluent.Follow` is the way to subscribe: it posts the repaint
+across with `BeginInvoke` and detaches when the control is disposed. Controls that read
+`Fluent` as they paint need nothing else; the few that hold concrete colours — the log
+viewer's text area, the text field inside `FluentTextBox` — re-apply them there.
+
+> Testing this needs the broadcast, not just the registry. Writing `AppsUseLightTheme`
+> changes nothing observable on its own: Windows is what sends `WM_SETTINGCHANGE` with
+> `ImmersiveColorSet`, and without it no app hears anything. A test that pokes the
+> registry and concludes the app ignores the theme is testing itself.
 
 ## Which devices get kept awake
 
@@ -45,10 +98,11 @@ Two gates, both in `ShouldKeepAwake`:
 1. **It must be a Bluetooth output.** Monitors, USB and analogue devices never idle off,
    so holding a stream open on them achieves nothing. Worse, holding *earbuds* awake stops
    them auto-powering-off and drains their battery. Anything non-Bluetooth is left alone.
-2. **That speaker must not be switched off** in Settings → *Keep these speakers awake*.
+2. **That speaker must not be switched off**, either on the flyout or on the Settings
+   window's *Speakers* page.
 
-When either gate fails the silent session is stopped and the tray reports
-`Status: idle - <reason>`. The reason is logged, so it's never a mystery.
+When either gate fails the silent stream is stopped and the flyout reports `Idle` with
+the reason on the card below it. The reason is logged too, so it's never a mystery.
 
 Settings are stored per physical device under:
 
@@ -62,8 +116,9 @@ Keyed by **ContainerId**, not endpoint id: an endpoint id changes when a device 
 re-paired, but the container is stable, so a speaker keeps its setting. New Bluetooth
 speakers default to enabled.
 
-The list shows connected Bluetooth speakers plus any seen before, marked
-`(not connected)`, so a speaker that is currently switched off can still be configured.
+The *Speakers* page lists connected Bluetooth speakers plus any seen before, marked
+`Not connected right now`, so a speaker that is currently switched off can still be
+configured.
 
 > One speaker publishes several endpoints — A2DP (`Speakers (X)`), Hands-Free
 > (`Headset Earphone (X Hands-Free)`), AVRCP — which all share a container. The list is
@@ -245,7 +300,6 @@ window on scaled displays and everything — text included — goes blurry.
 | `SpeakerKeeper.exe` | The app. No window; lives in the tray. |
 | `SpeakerKeeper.cs` | Full source, single file. |
 | `SpeakerKeeper.ico` | App icon (also embedded in the exe). |
-| `silent.wav` | The silent loop that holds the stream open. |
 | `Uninstall.exe` | Removes the app (same as the entry in Settings → Apps). |
 | `app.manifest` | `asInvoker` + DPI-aware, for the app. |
 | `assets/` | Logo PNGs extracted from the icon, for the README and the wizard header. |
@@ -256,17 +310,6 @@ window on scaled displays and everything — text included — goes blurry.
 | `build.ps1` | Builds all three exes. |
 
 The log is **not** in this folder — it lives in `%LocalAppData%\Speaker Keeper`.
-
-### About `silent.wav`
-
-It is **true digital silence**, not white noise or a faint tone: 20 seconds of 44.1 kHz
-16-bit stereo where all 1,764,000 samples are exactly zero.
-
-It isn't there to make a sound — it's the payload the Windows media API needs in order
-to have something to "play". The keep-alive comes from the *session*, not the audio:
-Windows only holds the Bluetooth A2DP link up while an output stream is open, so the
-app keeps a stream open that happens to carry nothing but zeros. No audio is produced,
-and the volume slider position is irrelevant.
 
 ## Installing
 
@@ -299,9 +342,7 @@ arrangement as the uninstaller, so the installer and uninstaller share `Installe
 and cannot disagree about what an install consists of.
 
 The whole runtime payload is embedded with `/resource:` and written out at install time,
-so the distributable is one file. `silent.wav` is the exception — it is 3.4 MB of zeros,
-so `Payload.WriteSilentWav` regenerates it byte-for-byte instead of carrying it, which
-keeps the download at ~290 KB rather than ~3.7 MB.
+so the distributable is one file, around 300 KB.
 
 It writes the uninstall entry to HKLM, sets the update feed, creates a Start Menu
 shortcut, and enables autostart for the installing user.
@@ -318,7 +359,7 @@ target folder.
 
 | Path | Contents | Writable by |
 |---|---|---|
-| `C:\Program Files\Speaker Keeper` | exe, uninstaller, icon, `silent.wav` | admin only |
+| `C:\Program Files\Speaker Keeper` | exe, uninstaller, icon | admin only |
 | `%LocalAppData%\Speaker Keeper` | `SpeakerKeeper.log` | the user |
 | `HKCU\Software\SpeakerKeeper` | preferences | the user |
 | `HKCU\...\CurrentVersion\Run` | autostart entry | the user |

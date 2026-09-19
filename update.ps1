@@ -113,6 +113,15 @@ try {
         Write-Log ("  installed " + $s.Name)
     }
 
+    # Installs up to 1.2.1 wrote a 3.4 MB silent.wav that the app no longer reads.
+    # Nothing else will ever remove it, and this task is the only thing that runs with
+    # rights to Program Files, so it clears it out on the way past.
+    $stale = Join-Path $InstallDir "silent.wav"
+    if (Test-Path $stale) {
+        Remove-Item $stale -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path $stale)) { Write-Log "removed the obsolete silent.wav" }
+    }
+
     Set-ItemProperty "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\SpeakerKeeper" `
         -Name "DisplayVersion" -Value $manifest.version -ErrorAction SilentlyContinue
 

@@ -41,8 +41,6 @@ if ($LASTEXITCODE -ne 0) { throw "SpeakerKeeper.exe failed to build" }
 if ($LASTEXITCODE -ne 0) { throw "Uninstall.exe failed to build" }
 
 # --- Install.exe ---------------------------------------------------------------
-# silent.wav is deliberately NOT embedded: it is 3.4 MB of pure zeros, so the
-# installer generates it instead of carrying it. See Payload.WriteSilentWav.
 $payload = @(
     "/resource:$out\SpeakerKeeper.exe,SpeakerKeeper.exe",
     "/resource:$out\Uninstall.exe,Uninstall.exe",

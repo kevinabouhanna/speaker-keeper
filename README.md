@@ -49,7 +49,7 @@ It sits in your system tray and stays out of the way:
 | 🔇 **Truly silent** | It plays digital silence, not a faint hum or a tone. Nothing comes out of the speaker. |
 | 🔋 **Shows your battery** | Hover the tray icon to see your speaker's charge, and get a warning when it runs low. |
 | 🎧 **Leaves earbuds alone** | Only works on Bluetooth *speakers*. It won't hold your earbuds awake and drain them. |
-| ⏯️ **Your media keys still work** | Play/pause and next-track keep controlling Spotify, YouTube and everything else. |
+| 👻 **Windows never sees it** | No card in the media flyout, no row in the volume mixer, no hijacked media keys. |
 | 🔀 **Follows your speaker** | Switch audio output and it follows along automatically. |
 | 🪶 **Tiny** | A single small app. No account, no background service, no telemetry. |
 
@@ -75,12 +75,15 @@ just like any other program.
 Find the Speaker Keeper icon in your system tray (you may need to click the `^` arrow to
 show hidden icons — drag it out to pin it).
 
-- **Hover** to see your speaker and its battery level.
-- **Right-click** for the menu: which speaker is connected, whether it's being kept awake,
-  and **Start with Windows**.
-- **Double-click** to open Settings, where you can pick which speakers to keep awake and
-  set the low-battery warning.
-- **Quit** from the menu whenever you want your speaker to go back to sleeping normally.
+- **Click it once** and a panel opens above the tray, the same way the volume and
+  brightness panels do. It shows your speaker, whether it's being kept awake and its
+  battery, with a switch to turn Speaker Keeper off for that speaker. Click anywhere else
+  to close it.
+- **Hover** to see your speaker and its battery level without opening anything.
+- **The cog** on the panel opens Settings: the low-battery warning, which speakers to keep
+  awake, automatic updates and the activity log.
+- **The power button** next to it quits, letting your speaker go back to sleeping normally.
+  It's on the right-click menu too.
 
 ## FAQ
 
@@ -138,7 +141,7 @@ carries the whole payload inside itself, so that one file is the entire distribu
 ## Under the hood
 
 Curious how it actually works, or want to contribute? The full engineering write-up —
-the silent media session, battery detection over Bluetooth, the auto-updater and every
+the silent audio stream, battery detection over Bluetooth, the auto-updater and every
 design decision — is in **[docs/TECHNICAL.md](docs/TECHNICAL.md)**.
 
 Publishing a new version is documented in **[docs/RELEASING.md](docs/RELEASING.md)**.
