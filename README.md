@@ -10,6 +10,8 @@
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-blue?style=flat-square)](#requirements)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 
+**[speakerkeeper.github.io](https://speakerkeeper.github.io)**
+
 [Download](#install) · [Why you need it](#the-problem) · [FAQ](#faq)
 
 </div>

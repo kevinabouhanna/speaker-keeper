@@ -19,7 +19,11 @@ Added / Changed / Fixed / Removed / Security
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- **The icon is now blue instead of purple.** Speaker Keeper is a Bluetooth app, so it
+  may as well look like one. The tray icon, the shortcut, the installer and the Settings
+  window all pick the new one up. Nothing about how it behaves has changed.
 
 ## [1.2.0] - 2026-09-19
 
