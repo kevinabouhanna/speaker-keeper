@@ -45,10 +45,14 @@ jobs:
           set -euo pipefail
           echo "Release $TAG"
 
-          # Only these two are swapped in place by update.ps1, so only these belong in
-          # the manifest. silent.wav and the icon are static, and shipping them would
-          # make every update needlessly re-download 3.4 MB.
-          echo "SpeakerKeeper.exe Uninstall.exe" > payload.txt
+          # What update.ps1 swaps in place, and therefore what belongs in the manifest.
+          # The icon is static and is not worth re-downloading on every release.
+          #
+          # update.ps1 is LAST on purpose: it is the script performing the swap, so it
+          # replaces itself. Doing it after the binaries means that if that one step ever
+          # fails, the update has already landed and the machine settles on the new
+          # version rather than retrying the whole thing every night forever.
+          echo "SpeakerKeeper.exe Uninstall.exe update.ps1" > payload.txt
 
           # A release fires "published" the moment it is created, which is normally
           # BEFORE its assets have finished uploading. Rather than let the manifest

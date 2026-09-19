@@ -60,16 +60,22 @@ capability, **MAJOR** for breaking where settings or install paths live.
 4. **Install it on a real machine and run it.** The binary is the product; the source is
    not. This is the only step that catches a packaging mistake.
 
-5. **Commit and push**, then **create the release** — tag `v1.2.0`, attaching all three:
+5. **Commit and push**, then **create the release** — tag `v1.2.0`, attaching all four:
 
    | Asset | Who downloads it |
    |---|---|
    | `Install.exe` | People. This is the README's download link. |
    | `SpeakerKeeper.exe` | The auto-updater, which swaps it in place. |
    | `Uninstall.exe` | The auto-updater, same. |
+   | `update.ps1` | The auto-updater, replacing itself. |
 
-   Skipping the two bare exes means every auto-update 404s, because the manifest points
-   at them by name. `Install.exe` embeds its own copies, so it is self-contained.
+   Skipping any of the last three means every auto-update 404s, because the manifest
+   points at them by name. `Install.exe` embeds its own copies, so it is self-contained.
+
+   `update.ps1` is in the manifest so the updater itself can be fixed on machines that
+   only ever update in the background — otherwise the only copy that ever runs there
+   is whatever shipped with the last `Install.exe` the user ran by hand. It is listed
+   **last**, so it replaces itself only after the binaries have landed.
 
 6. **Nothing else.** Publishing fires
    [`release-manifest.yml`](../.github/workflows/release-manifest.yml), which verifies
@@ -136,7 +142,7 @@ git revert <bad-commit>            # or: git revert <first>..<last>
 .\verify.ps1
 .\Install.exe
 
-# 5. Release v1.2.1 with all three assets
+# 5. Release v1.2.1 with all four assets
 ```
 
 Clients move `1.2.0 → 1.2.1` and land on the reverted code. Because the binaries are

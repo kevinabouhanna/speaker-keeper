@@ -21,6 +21,18 @@ Added / Changed / Fixed / Removed / Security
 
 Nothing yet.
 
+## [1.3.1] - 2026-09-19
+
+### Fixed
+
+- **The leftover `silent.wav` is now cleared from machines that update in the
+  background.** 1.3.0 stopped using the file and the installer deletes it, but a
+  background update replaces only the program itself, so anyone who updated overnight
+  was left with 3.4 MB of dead weight in their install folder and no way to be rid of it
+  short of reinstalling. The updater now tidies the install folder on every check, and
+  the installer does the same, so this and the `.old` copies left behind by previous
+  updates clear themselves.
+
 ## [1.3.0] - 2026-09-19
 
 ### Added
@@ -134,7 +146,8 @@ First public release.
 - Follows the default output device when you switch speakers.
 - Per-speaker on/off, a live log viewer, start-with-Windows, and opt-in auto-updates.
 
-[Unreleased]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.3.1...HEAD
+[1.3.1]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/kevinabouhanna/speaker-keeper/releases/tag/v1.2.1
 [1.2.0]: https://github.com/kevinabouhanna/speaker-keeper/releases/tag/v1.2.0

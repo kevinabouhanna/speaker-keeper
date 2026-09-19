@@ -13,6 +13,11 @@
 #       { "name": "Uninstall.exe",     "url": "https://.../Uninstall.exe",     "sha256": "DEF..." }
 #     ]
 #   }
+#
+# This script is itself in that list, so an update replaces the copy that is running it.
+# PowerShell reads a script in full before executing, and Windows allows an open file to
+# be renamed, so the swap below can move this file aside safely. The running process
+# carries on from memory; the new script takes over at the next nightly check.
 [CmdletBinding()]
 param(
     [switch]$Force,          # install even if the version isn't newer (for testing)
@@ -44,6 +49,36 @@ function Assert-SafeUrl([string]$url) {
     throw "refusing non-HTTPS url: $url"
 }
 
+# Deletes what older versions left behind in the install folder.
+#
+# This runs on EVERY invocation, before the version comparison, and that is the whole
+# point. The script that runs on a user's machine is whatever copy is already installed,
+# so a cleanup that only fired while applying an update would sit dormant until the
+# release AFTER the one that delivered it. Running it unconditionally means the first
+# nightly check after this script lands does the work.
+#
+# Scoped to exact names and to *.old inside the install folder, and every failure is
+# swallowed: this runs as SYSTEM, and nothing here is worth failing an update over.
+function Remove-Stale {
+    # silent.wav: 3.4 MB of zeros that versions up to 1.2.1 installed. Nothing has read
+    # it since 1.3.0 - the app renders its own silence now.
+    $dead = @("silent.wav")
+    foreach ($name in $dead) {
+        $f = Join-Path $InstallDir $name
+        if (-not (Test-Path $f)) { continue }
+        Remove-Item $f -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path $f)) { Write-Log ("removed obsolete " + $name) }
+    }
+
+    # The previous copy of each file an update replaced. The one the running app is
+    # executing from cannot be deleted while it runs, so this quietly leaves it for the
+    # next pass rather than treating it as a problem.
+    foreach ($f in @(Get-ChildItem -Path $InstallDir -Filter "*.old" -File -ErrorAction SilentlyContinue)) {
+        Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path $f.FullName)) { Write-Log ("removed leftover " + $f.Name) }
+    }
+}
+
 function Get-InstalledVersion {
     $exe = Join-Path $InstallDir "SpeakerKeeper.exe"
     if (-not (Test-Path $exe)) { return [Version]"0.0.0.0" }
@@ -52,6 +87,7 @@ function Get-InstalledVersion {
 
 try {
     Write-Log "--- update check starting"
+    Remove-Stale
 
     if (-not $ManifestUrl) {
         $ManifestUrl = (Get-ItemProperty $MachineKey -Name UpdateUrl -ErrorAction SilentlyContinue).UpdateUrl
@@ -111,15 +147,6 @@ try {
         }
         Move-Item $s.Path $target -Force
         Write-Log ("  installed " + $s.Name)
-    }
-
-    # Installs up to 1.2.1 wrote a 3.4 MB silent.wav that the app no longer reads.
-    # Nothing else will ever remove it, and this task is the only thing that runs with
-    # rights to Program Files, so it clears it out on the way past.
-    $stale = Join-Path $InstallDir "silent.wav"
-    if (Test-Path $stale) {
-        Remove-Item $stale -Force -ErrorAction SilentlyContinue
-        if (-not (Test-Path $stale)) { Write-Log "removed the obsolete silent.wav" }
     }
 
     Set-ItemProperty "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\SpeakerKeeper" `

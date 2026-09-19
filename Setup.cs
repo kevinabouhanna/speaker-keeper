@@ -12,6 +12,7 @@
 // this runs - the same prompt any other installer shows.
 
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
@@ -146,21 +147,27 @@ static class SetupActions
     }
 
     /// <summary>
-    /// Files earlier versions installed that nothing reads any more.
+    /// Files earlier versions left in the install folder that nothing reads any more.
     ///
     /// Installing over an existing copy only overwrites what is being written, so
     /// without this the 3.4 MB silent.wav that versions up to 1.2.1 wrote would sit in
-    /// Program Files forever on every machine that ever ran one of them.
+    /// Program Files forever on every machine that ever ran one of them. The .old copies
+    /// are the previous binaries an update moved aside; the install has already stopped
+    /// the running app, so nothing is holding them open by the time this runs.
     /// </summary>
     static readonly string[] Obsolete = { "silent.wav" };
 
     static void RemoveObsolete(string target)
     {
-        foreach (var name in Obsolete)
+        var dead = new List<string>(Obsolete);
+        try { dead.AddRange(Directory.GetFiles(target, "*.old")); }
+        catch { }
+
+        foreach (var name in dead)
         {
             try
             {
-                string f = Path.Combine(target, name);
+                string f = Path.IsPathRooted(name) ? name : Path.Combine(target, name);
                 if (File.Exists(f)) File.Delete(f);
             }
             catch { }   // a leftover file is not worth failing an install over
