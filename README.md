@@ -53,10 +53,14 @@ It sits in your system tray and stays out of the way:
 
 ## Install
 
-1. **[Download the latest release](https://github.com/kevinabouhanna/speaker-keeper/releases/latest)**
-   and unzip it.
-2. Right-click `install.ps1` → **Run with PowerShell** (approve the admin prompt).
-3. That's it. Speaker Keeper starts with Windows and appears in your system tray.
+1. **[Download `Install.exe`](https://github.com/kevinabouhanna/speaker-keeper/releases/latest)**
+2. **Double-click it** and say yes to the Windows permission prompt.
+3. Follow the setup wizard.
+
+That's it. Speaker Keeper appears in your system tray and starts with Windows.
+
+To remove it later: Settings → Apps → Installed apps → **Speaker Keeper** → Uninstall,
+just like any other program.
 
 > [!NOTE]
 > **Windows will show a blue "Windows protected your PC" warning.** That's SmartScreen —
@@ -75,10 +79,6 @@ show hidden icons — drag it out to pin it).
 - **Double-click** to open Settings, where you can pick which speakers to keep awake and
   set the low-battery warning.
 - **Quit** from the menu whenever you want your speaker to go back to sleeping normally.
-
-### Uninstall
-
-Settings → Apps → Installed apps → **Speaker Keeper** → Uninstall. It removes everything.
 
 ## FAQ
 
@@ -127,8 +127,11 @@ You don't need Visual Studio or the .NET SDK — Windows already has everything:
 git clone https://github.com/kevinabouhanna/speaker-keeper.git
 cd speaker-keeper
 .\build.ps1
-Start-Process powershell -Verb RunAs -ArgumentList '-ExecutionPolicy','Bypass','-File','install.ps1'
+.\Install.exe
 ```
+
+`build.ps1` produces `SpeakerKeeper.exe`, `Uninstall.exe` and `Install.exe`. The installer
+carries the whole payload inside itself, so that one file is the entire distributable.
 
 ## Under the hood
 

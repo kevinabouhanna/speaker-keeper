@@ -248,9 +248,12 @@ window on scaled displays and everything — text included — goes blurry.
 | `silent.wav` | The silent loop that holds the stream open. |
 | `Uninstall.exe` | Removes the app (same as the entry in Settings → Apps). |
 | `app.manifest` | `asInvoker` + DPI-aware, for the app. |
+| `assets/` | Logo PNGs extracted from the icon, for the README and the wizard header. |
 | `uninstall.manifest` | `requireAdministrator` + DPI-aware, for the uninstaller. |
-| `build.ps1` | Builds both exes. |
-| `install.ps1` | Machine-wide installer (run elevated). |
+| `Install.exe` | The installer. Carries the whole payload as embedded resources. |
+| `Setup.cs` | Installer source: the wizard and the install steps. |
+| `install.manifest` | `requireAdministrator` + DPI-aware, for the installer. |
+| `build.ps1` | Builds all three exes. |
 
 The log is **not** in this folder — it lives in `%LocalAppData%\Speaker Keeper`.
 
@@ -268,16 +271,48 @@ and the volume slider position is irrelevant.
 ## Installing
 
 Speaker Keeper is a **machine-wide** install in `C:\Program Files\Speaker Keeper`, like
-ordinary Windows software. Build, then run the installer elevated:
+ordinary Windows software.
 
 ```powershell
 .\build.ps1
-Start-Process powershell -Verb RunAs -ArgumentList '-ExecutionPolicy','Bypass','-File','install.ps1'
+.\Install.exe
 ```
 
-`install.ps1` copies the runtime payload (exe, uninstaller, icon, wav, README — not the
-source or build scripts), writes the uninstall entry to HKLM, creates a Start Menu
+### Why the installer is an exe
+
+It used to be `install.ps1`, run by hand. That is not something you can hand to a
+stranger, for three separate reasons:
+
+1. **"Run with PowerShell" does not elevate.** The script needs admin for Program Files
+   and HKLM, so it aborted immediately.
+2. **The verb is not always registered.** On a machine with no `.ps1` association,
+   double-clicking opens the script in an editor.
+3. **Execution policy blocks it.** A downloaded file carries a Mark-of-the-Web, and the
+   default `RemoteSigned` refuses to run an unsigned script that has one.
+
+`Install.exe` has none of those problems: its manifest declares `requireAdministrator`,
+so Windows raises the normal UAC prompt on double-click, and an exe has no execution
+policy to satisfy.
+
+It is built from `SpeakerKeeper.cs` + `Setup.cs` with `/main:SetupProgram`, the same
+arrangement as the uninstaller, so the installer and uninstaller share `Installer.UninstallKey`
+and cannot disagree about what an install consists of.
+
+The whole runtime payload is embedded with `/resource:` and written out at install time,
+so the distributable is one file. `silent.wav` is the exception — it is 3.4 MB of zeros,
+so `Payload.WriteSilentWav` regenerates it byte-for-byte instead of carrying it, which
+keeps the download at ~290 KB rather than ~3.7 MB.
+
+It writes the uninstall entry to HKLM, sets the update feed, creates a Start Menu
 shortcut, and enables autostart for the installing user.
+
+`Install.exe /S` installs silently for scripted deployment, and `/D <path>` overrides the
+target folder.
+
+> The final **Launch Speaker Keeper now** goes through `explorer.exe` rather than starting
+> the app directly. Setup is elevated and a child process inherits that; a tray app running
+> as administrator writes settings to the wrong hive and loses drag-and-drop from Explorer.
+> Handing the launch to the shell puts it back in the user's own token.
 
 ### What goes where
 

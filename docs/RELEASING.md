@@ -29,11 +29,18 @@ contents of `manifest.json` change when you ship. Installed copies check it dail
    git commit -am "Bump to 1.1.0"; git push
    ```
 
-3. **Create the release** — tag `v1.1.0`, and attach **all three** assets:
-   `SpeakerKeeper.exe`, `Uninstall.exe`, and a `SpeakerKeeper-1.1.0-win.zip` for humans.
+   Also bump `version=` in `app.manifest`, `install.manifest` and `uninstall.manifest`.
 
-   The two bare exes are what the updater swaps in place; the zip is what the README's
-   download link points at. Skipping the bare exes means the updater 404s.
+3. **Create the release** — tag `v1.1.0`, and attach **all three** exes:
+
+   | Asset | Who downloads it |
+   |---|---|
+   | `Install.exe` | People. This is the README's download link and the whole distributable. |
+   | `SpeakerKeeper.exe` | The auto-updater, which swaps it in place. |
+   | `Uninstall.exe` | The auto-updater, same. |
+
+   Skipping the two bare exes means every auto-update 404s, because the manifest points
+   at them by name. `Install.exe` embeds its own copies, so it is self-contained.
 
 4. **Nothing else.** Publishing the release fires
    [`.github/workflows/release-manifest.yml`](../.github/workflows/release-manifest.yml),
