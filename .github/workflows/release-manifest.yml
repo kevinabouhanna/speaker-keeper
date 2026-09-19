@@ -1,0 +1,86 @@
+# Regenerates manifest.json from a published release's own assets.
+#
+# The auto-updater aborts if a declared SHA-256 doesn't match what it downloads, so a
+# hand-edited manifest with a stale hash silently breaks updates for every installed
+# copy. This hashes the real assets instead, which makes that class of mistake
+# impossible: the manifest can only ever describe files that were actually published.
+#
+# Trigger: publishing a release. Run it manually against an existing tag with
+# "Run workflow" if a manifest ever needs rebuilding.
+name: Update release manifest
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to rebuild the manifest from (e.g. v1.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Build manifest from release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          echo "Building manifest for $TAG"
+
+          # Only these are swapped in place by update.ps1. silent.wav and the icon are
+          # static, and shipping them would make every update needlessly re-download 3.4 MB.
+          PAYLOAD="SpeakerKeeper.exe Uninstall.exe"
+
+          mkdir -p dl
+          for name in $PAYLOAD; do
+            echo "  downloading $name"
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+               --pattern "$name" --dir dl --clobber
+          done
+
+          VERSION="${TAG#v}"
+          {
+            echo '{'
+            echo "  \"version\": \"$VERSION\","
+            echo '  "files": ['
+            first=1
+            for name in $PAYLOAD; do
+              sha=$(sha256sum "dl/$name" | cut -d' ' -f1 | tr '[:lower:]' '[:upper:]')
+              url="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$name"
+              [ $first -eq 1 ] || echo '    },'
+              first=0
+              echo '    {'
+              echo "      \"name\": \"$name\","
+              echo "      \"url\": \"$url\","
+              echo "      \"sha256\": \"$sha\""
+            done
+            echo '    }'
+            echo '  ]'
+            echo '}'
+          } > manifest.json
+
+          cat manifest.json
+          python3 -c "import json;json.load(open('manifest.json'))" && echo "valid JSON"
+
+      - name: Commit manifest
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- manifest.json; then
+            echo "manifest.json already up to date"
+            exit 0
+          fi
+          git add manifest.json
+          git commit -m "Update manifest for ${{ github.event.release.tag_name || inputs.tag }}"
+          git push origin main

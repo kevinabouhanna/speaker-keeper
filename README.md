@@ -102,9 +102,15 @@ holding them awake would just flatten them in your ears.
 Yes. It works at the Windows audio level, so the brand doesn't matter. The battery
 readout depends on whether your speaker reports it to Windows — many do, some don't.
 
+**How do I get new versions?**
+Open Settings and tick **Install updates automatically**. Windows asks for permission
+once, then it quietly checks for a new version each night and installs it in the
+background. It's **off unless you turn it on** — otherwise Speaker Keeper never touches
+the internet at all.
+
 **Does it send my data anywhere?**
-No. There's no account, no network connection and no analytics. It only reaches the
-internet if you turn on automatic updates.
+No. There's no account, no analytics and no tracking of any kind. The only network
+request it ever makes is the update check, and only if you switch it on.
 
 ## Requirements
 
@@ -129,6 +135,8 @@ Start-Process powershell -Verb RunAs -ArgumentList '-ExecutionPolicy','Bypass','
 Curious how it actually works, or want to contribute? The full engineering write-up —
 the silent media session, battery detection over Bluetooth, the auto-updater and every
 design decision — is in **[docs/TECHNICAL.md](docs/TECHNICAL.md)**.
+
+Publishing a new version is documented in **[docs/RELEASING.md](docs/RELEASING.md)**.
 
 ## Contributing
 

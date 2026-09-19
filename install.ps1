@@ -8,9 +8,11 @@
 param(
     [string]$Source = $PSScriptRoot,
     [string]$Target = (Join-Path $env:ProgramFiles "Speaker Keeper"),
-    # HTTPS URL of the release manifest the auto-updater polls. Can also be set later:
+    # HTTPS URL of the release manifest the auto-updater polls. Defaults to the
+    # manifest in the public repo, which a GitHub Actions workflow regenerates from
+    # each release's own assets. Override for a private/self-hosted feed, or set later:
     #   Set-ItemProperty HKLM:\Software\SpeakerKeeper UpdateUrl 'https://...'
-    [string]$UpdateUrl
+    [string]$UpdateUrl = "https://raw.githubusercontent.com/kevinabouhanna/speaker-keeper/main/manifest.json"
 )
 
 $ErrorActionPreference = "Stop"

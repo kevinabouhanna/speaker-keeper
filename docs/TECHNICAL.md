@@ -333,17 +333,28 @@ update after that is silent.
 | Task | `Speaker Keeper Update`, daily at 03:00, `SYSTEM`, highest privileges |
 | Runs | `powershell.exe -File "C:\Program Files\Speaker Keeper\update.ps1"` |
 | Flag | `HKLM\Software\SpeakerKeeper\AutoUpdate` |
-| Feed | `HKLM\Software\SpeakerKeeper\UpdateUrl` |
+| Feed | `HKLM\Software\SpeakerKeeper\UpdateUrl` — defaults to the repo manifest (see [RELEASING.md](RELEASING.md)) |
 | Log | `%ProgramData%\Speaker Keeper\update.log` |
 
-Set the feed at install time or later:
+The feed is hosted on GitHub at no cost: the binaries are release assets and the
+manifest is `manifest.json` on `main`, served raw. `install.ps1` defaults `UpdateUrl` to
+
+```
+https://raw.githubusercontent.com/kevinabouhanna/speaker-keeper/main/manifest.json
+```
+
+which is a permanent URL — only its contents change per release. A GitHub Actions
+workflow regenerates it from each release's own assets, so a declared hash can never
+drift from the published binary. The full process is in **[RELEASING.md](RELEASING.md)**.
+
+Override it for a self-hosted or private feed, at install time or later:
 
 ```powershell
 .\install.ps1 -UpdateUrl 'https://example.com/speakerkeeper/manifest.json'
 Set-ItemProperty HKLM:\Software\SpeakerKeeper UpdateUrl 'https://...'
 ```
 
-With no `UpdateUrl` the updater logs "no UpdateUrl configured" and exits cleanly.
+With no `UpdateUrl` at all the updater logs "no UpdateUrl configured" and exits cleanly.
 
 ### Manifest format
 
