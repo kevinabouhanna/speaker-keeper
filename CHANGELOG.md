@@ -30,7 +30,6 @@ Added / Changed / Fixed / Removed / Security
 - **A speaker that drops steadily rather than rapidly is now spotted too.** The warning
   needed three disconnections inside one hour, which never triggers for a speaker that
   drops every couple of hours all evening. Four in six hours now counts as well.
-
 - **Two speakers of the same model can be told apart.** A stereo pair is two identical
   speakers, so both announce the same name, and Settings showed two identical rows with a
   switch each and no way to know which was which. The last four digits of the Bluetooth
