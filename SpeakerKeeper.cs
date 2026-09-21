@@ -22,8 +22,8 @@ using System.Windows.Forms;
 [assembly: AssemblyDescription("Keeps a Bluetooth speaker awake with a silent audio stream")]
 [assembly: AssemblyCompany("Kevin Abou Hanna")]
 [assembly: AssemblyCopyright("Copyright (c) Kevin Abou Hanna")]
-[assembly: AssemblyVersion("1.4.0.0")]
-[assembly: AssemblyFileVersion("1.4.0.0")]
+[assembly: AssemblyVersion("1.5.0.0")]
+[assembly: AssemblyFileVersion("1.5.0.0")]
 
 [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
 class MMDeviceEnumeratorClass { }
@@ -134,6 +134,11 @@ static class DeviceProps
     // Bluetooth Class of Device: what the device says it is. Used instead of the endpoint
     // name because the name is localised and this is three bits of a number.
     static readonly DEVPROPKEY ClassOfDevice = new DEVPROPKEY("2bd67d8b-8beb-48d5-87e0-6cda3428040a", 10);
+    // Used to find the radios themselves. A Bluetooth-class devnode on the USB or PCI bus
+    // is an adapter; everything paired to it lives on BTHENUM and friends instead.
+    static readonly DEVPROPKEY DeviceClass   = new DEVPROPKEY("a45c254e-df1c-4efd-8020-67d146a850e0", 9);
+    static readonly DEVPROPKEY DeviceDesc    = new DEVPROPKEY("a45c254e-df1c-4efd-8020-67d146a850e0", 2);
+    static readonly DEVPROPKEY ProblemCode   = new DEVPROPKEY("4340a6c5-93fa-4706-972c-7b648008a5a7", 3);
 
     [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
     static extern uint CM_Locate_DevNodeW(out uint devInst, string deviceId, uint flags);
@@ -204,16 +209,36 @@ static class DeviceProps
         public bool Present = true;
 
         /// <summary>
-        /// True for the endpoint that actually plays music.
+        /// Which of a speaker's two channels this endpoint is.
         ///
         /// One Bluetooth speaker publishes two render endpoints: the A2DP sink, which is
         /// stereo and is what "Speakers (X)" means, and the Hands-Free one, which is the
         /// mono call channel. Holding a stream open on the Hands-Free endpoint would put
-        /// the speaker into call mode and make music sound like a phone, so only the A2DP
-        /// one is ever kept awake. They are told apart by their parent devnode - the A2DP
-        /// sink's carries the AudioSink UUID - because the names are localised.
+        /// the speaker into call mode and make music sound like a phone, so that one is
+        /// never kept awake. They are told apart by their parent devnode rather than by
+        /// name, because the names are localised.
+        ///
+        /// Unknown is the case that matters for hardware nobody here has: a Bluetooth
+        /// stack that hangs its endpoints off something else entirely. Refusing to act on
+        /// those would leave the app doing nothing at all and reporting the wrong reason,
+        /// so an Unknown endpoint is used when its speaker publishes no A2DP one. Only
+        /// HandsFree is ever ruled out outright, because that one does harm.
         /// </summary>
-        public bool IsA2dp;
+        public Channel Kind;
+
+        public bool IsA2dp { get { return Kind == Channel.A2dp; } }
+
+        /// <summary>The output Windows is currently playing through. Set by the policy.</summary>
+        public bool IsDefault;
+    }
+
+    public enum Channel { Unknown, A2dp, HandsFree }
+
+    /// <summary>A Bluetooth radio: the adapter itself, not anything paired to it.</summary>
+    public class Radio
+    {
+        public string Name;
+        public uint Problem;    // CM_PROB_*, 0 when the device is working
     }
 
     /// <summary>A paired Bluetooth device, and what it says it is.</summary>
@@ -273,6 +298,24 @@ static class DeviceProps
         {
             BluetoothDevice d;
             return Bluetooth.TryGetValue(container, out d) ? d : null;
+        }
+
+        /// <summary>
+        /// Whether this is the endpoint to hold for its speaker.
+        ///
+        /// A2DP wins wherever a speaker publishes one. Where none does, an endpoint we
+        /// could not classify is used rather than none at all: on a Bluetooth stack this
+        /// code has never seen, refusing to act would leave the app silently doing
+        /// nothing and reporting a reason that is not true. Hands-free is never used, on
+        /// any stack, because that one does harm rather than nothing.
+        /// </summary>
+        public bool IsPlayable(AudioDevice d)
+        {
+            if (d.Kind == Channel.HandsFree) return false;
+            if (d.Kind == Channel.A2dp) return true;
+            foreach (var o in Outputs)
+                if (o.Container == d.Container && o.Kind == Channel.A2dp) return false;
+            return true;
         }
 
         /// <summary>The speaker's own name, rather than the endpoint's.</summary>
@@ -370,13 +413,50 @@ static class DeviceProps
             dev.IsBluetooth = dev.Container != Guid.Empty && snap.Bluetooth.ContainsKey(dev.Container);
 
             var parent = StringProperty(id, Parent);
-            dev.IsA2dp = parent != null
-                && parent.IndexOf("{0000110b", StringComparison.OrdinalIgnoreCase) >= 0;
+            dev.Kind =
+                parent == null ? Channel.Unknown
+              : parent.IndexOf("{0000110b", StringComparison.OrdinalIgnoreCase) >= 0 ? Channel.A2dp
+              : parent.StartsWith("BTHHFENUM", StringComparison.OrdinalIgnoreCase) ? Channel.HandsFree
+              : Channel.Unknown;
 
             snap.Outputs.Add(dev);
         }
 
         return snap;
+    }
+
+    /// <summary>
+    /// The Bluetooth adapters attached to this PC right now.
+    ///
+    /// Windows drives exactly one of them, whatever is plugged in, and says so in the
+    /// system log when it finds a second. Two adapters is therefore not a spare: it is a
+    /// coin toss over which one your speaker ends up on, settled at boot. Worth knowing
+    /// about, because a speaker that drops every few minutes on one of them behaves
+    /// perfectly on the other, and nothing in the audio stack says why.
+    ///
+    /// Adapters that are unplugged do not appear: GetProperty resolves present devnodes
+    /// only. One with a driver problem does, because it is attached, just not working.
+    /// </summary>
+    public static List<Radio> Radios()
+    {
+        var list = new List<Radio>();
+        foreach (var bus in new[] { "USB", "PCI" })
+            foreach (var id in DeviceIds(bus))
+            {
+                if (!string.Equals(StringProperty(id, DeviceClass), "Bluetooth",
+                                   StringComparison.OrdinalIgnoreCase)) continue;
+
+                var r = new Radio();
+                r.Name = StringProperty(id, FriendlyName)
+                      ?? StringProperty(id, DeviceDesc)
+                      ?? "Bluetooth adapter";
+
+                var p = GetProperty(id, ProblemCode);
+                if (p != null && p.Length >= 4) r.Problem = BitConverter.ToUInt32(p, 0);
+
+                list.Add(r);
+            }
+        return list;
     }
 
     /// <summary>Battery percent of the default output device, or -1 when it doesn't report one.</summary>
@@ -2242,13 +2322,17 @@ class TrayFlyout : Form
 
         // Just the state here; when there is a reason, the card below carries it, and
         // printing it in both places reads like a stutter.
-        string status = _s.KeepingAwake ? "Keeping awake" : "Idle";
+        // The panel names the output you are listening through, so a speaker held awake in
+        // the background has to be mentioned or it is invisible until you switch to it.
+        // "Idle" on its own would also be wrong while the app is holding something else.
+        string status = _s.KeepingAwake ? "Keeping awake"
+                      : _s.AlsoHeld > 0 ? "Keeping " + _s.AlsoHeld
+                                          + (_s.AlsoHeld == 1 ? " other awake" : " others awake")
+                      : "Idle";
+        if (_s.KeepingAwake && _s.AlsoHeld > 0)
+            status += " (and " + _s.AlsoHeld + " more)";
         if (_s.Battery >= 0)
             status += "  ·  " + _s.Battery + "%" + (string.IsNullOrEmpty(_s.Charge) ? "" : " " + _s.Charge);
-        // The panel names the output you are listening through, so a speaker held awake
-        // in the background would otherwise be invisible until you switched to it.
-        if (_s.AlsoHeld > 0)
-            status += "  ·  +" + _s.AlsoHeld + " more";
 
         Fluent.Draw(g, status, Fluent.Caption, Fluent.TextSecondary,
             new Rectangle(Pad + 36, Pad + 22, W - Pad * 2 - 36, 18), left);
@@ -2637,8 +2721,34 @@ class SettingsForm : Form
 
         var seen = new HashSet<Guid>();
         var rows = new List<SettingsCard>();
+        int notices = 0;    // cards that are not a speaker, so the empty state still shows
         try
         {
+            // Anything the machine is doing that stops the app working goes first, before
+            // the switches, because a user looking at this page while their speaker keeps
+            // dying is here to find out why and not to toggle anything.
+            string advice = Health.Advice();
+            if (advice != null)
+            {
+                rows.Add(Card(Fluent.IconWarning, "Your speaker keeps disconnecting", advice, null));
+                notices++;
+            }
+
+            var adapters = Health.Adapters();
+            if (adapters.Count > 1)
+            {
+                var names = new List<string>();
+                foreach (var a in adapters)
+                    names.Add(a.Name + (a.Problem != 0 ? " (driver problem " + a.Problem + ")" : ""));
+
+                var card = Card(Fluent.IconBluetooth, "This PC has " + adapters.Count + " Bluetooth adapters",
+                    string.Join("  ·  ", names.ToArray())
+                    + ". Windows uses one of them at a time, chosen when the PC starts.", null);
+                card.Muted = true;
+                rows.Add(card);
+                notices++;
+            }
+
             // Rows are named after the physical Bluetooth device, not the audio endpoint:
             // one speaker exposes both "Speakers (X)" and "Headset Earphone (X Hands-Free)",
             // and only the first of those is a thing the user chose to own.
@@ -2646,7 +2756,7 @@ class SettingsForm : Form
 
             foreach (var d in snap.Outputs)
             {
-                if (!d.IsBluetooth || !d.IsA2dp || d.Container == Guid.Empty) continue;
+                if (!d.IsBluetooth || !snap.IsPlayable(d) || d.Container == Guid.Empty) continue;
                 if (!seen.Add(d.Container)) continue;
 
                 var bt = snap.Of(d.Container);
@@ -2687,7 +2797,7 @@ class SettingsForm : Form
         }
         catch { }
 
-        if (rows.Count == 0)
+        if (rows.Count == notices)
         {
             var empty = Card(Fluent.IconBluetooth, "No Bluetooth speakers found",
                 "Pair a speaker and connect it, then come back here.", null);
@@ -2955,19 +3065,42 @@ class Silence
     ManualResetEvent _stop;
     DateTime _startedAt;
     volatile string _error;
+    volatile int _hr;
 
     readonly string _endpointId;
+    readonly Guid _container;
 
     /// <summary>What to call this speaker in the log. Only ever used for that.</summary>
     public string Label;
 
-    public Silence(string endpointId, string label)
+    // How long to wait before trying this speaker again, and when that wait is up.
+    // A stream that fails the instant it is opened - another app holding the endpoint
+    // exclusively, a driver that will never accept it - would otherwise be rebuilt every
+    // five seconds for as long as the app runs, writing a line each time.
+    int _backoffSeconds;
+    DateTime _retryAt = DateTime.MinValue;
+
+    const int BackoffFirst = 5;
+    const int BackoffMax = 300;
+
+    public Silence(string endpointId, Guid container, string label)
     {
         _endpointId = endpointId;
+        _container = container;
         Label = label;
     }
 
     public string EndpointId { get { return _endpointId; } }
+    public Guid Container { get { return _container; } }
+
+    /// <summary>False while a failed stream is serving out its backoff.</summary>
+    public bool ReadyToRetry { get { return DateTime.UtcNow >= _retryAt; } }
+
+    /// <summary>Seconds until the next attempt, for the log line that says so.</summary>
+    public int RetryIn
+    {
+        get { return Math.Max(0, (int)Math.Round((_retryAt - DateTime.UtcNow).TotalSeconds)); }
+    }
 
     /// <summary>Why the last stream stopped, or null if it stopped because we said so.</summary>
     public string LastError { get { return _error; } }
@@ -3029,7 +3162,7 @@ class Silence
             // would also race the policy - the default can change between the decision to
             // hold a speaker and this thread getting as far as opening it.
             int opened = ((IMMDeviceEnumerator)en).GetDevice(_endpointId, out endpoint);
-            if (opened != 0 || endpoint == null) { Fail("open device " + Hex(opened)); return; }
+            if (opened != 0 || endpoint == null) { Fail("open device " + Hex(opened), opened); return; }
             dev = endpoint;
 
             var iid = typeof(IAudioClient).GUID;
@@ -3040,31 +3173,34 @@ class Silence
             var audio = (IAudioClient)obj;
 
             int hr = audio.GetMixFormat(out fmt);
-            if (hr != 0) { Fail("mix format " + Hex(hr)); return; }
+            if (hr != 0) { Fail("mix format " + Hex(hr), hr); return; }
 
             // The engine's own mix format, so the stream needs no conversion and no
             // resampler - it is the cheapest thing that still counts as playback.
             var session = SessionId;
             hr = audio.Initialize(ShareModeShared, SessionFlags, BufferDuration, 0, fmt, ref session);
-            if (hr != 0) { Fail("initialize " + Hex(hr)); return; }
+            if (hr != 0) { Fail("initialize " + Hex(hr), hr); return; }
 
             uint frames;
             hr = audio.GetBufferSize(out frames);
-            if (hr != 0 || frames == 0) { Fail("buffer size " + Hex(hr)); return; }
+            if (hr != 0 || frames == 0) { Fail("buffer size " + Hex(hr), hr); return; }
 
             var riid = typeof(IAudioRenderClient).GUID;
             object svc;
             hr = audio.GetService(ref riid, out svc);
-            if (hr != 0 || svc == null) { Fail("render client " + Hex(hr)); return; }
+            if (hr != 0 || svc == null) { Fail("render client " + Hex(hr), hr); return; }
             render = svc;
             var buffer = (IAudioRenderClient)svc;
 
             if (!Push(buffer, frames)) { Fail("could not fill the buffer"); return; }
 
             hr = audio.Start();
-            if (hr != 0) { Fail("start " + Hex(hr)); return; }
+            if (hr != 0) { Fail("start " + Hex(hr), hr); return; }
 
             _state = State.Running;
+            // A stream that actually came up clears the debt from previous failures.
+            _backoffSeconds = 0;
+            _retryAt = DateTime.MinValue;
             Program.Log("keeping " + Label + " awake");
 
             while (!_stop.WaitOne(FeedMs))
@@ -3073,7 +3209,7 @@ class Silence
                 hr = audio.GetCurrentPadding(out pad);
                 // The usual way out: the speaker disconnected or the endpoint was
                 // reconfigured, which invalidates the stream. The caller rebuilds.
-                if (hr != 0) { Fail("stream lost " + Hex(hr)); break; }
+                if (hr != 0) { Fail("stream lost " + Hex(hr), hr); break; }
                 if (frames > pad && !Push(buffer, frames - pad))
                 { Fail("stream lost while writing"); break; }
             }
@@ -3115,11 +3251,26 @@ class Silence
         try { Marshal.FinalReleaseComObject(o); } catch { }
     }
 
-    void Fail(string why)
+    void Fail(string why) { Fail(why, 0); }
+
+    void Fail(string why, int hr)
     {
+        bool wasUp = _state == State.Running;
+        _hr = hr;
         _error = why;
         _state = State.Failed;
+
+        _backoffSeconds = _backoffSeconds == 0
+            ? BackoffFirst
+            : Math.Min(_backoffSeconds * 2, BackoffMax);
+        _retryAt = DateTime.UtcNow.AddSeconds(_backoffSeconds);
+
         Program.Log(Label + ": " + why);
+
+        // Only a stream that was actually up counts as the speaker dropping. One that
+        // never started failed for some other reason, and calling that a disconnection
+        // would put the wrong advice in front of the user.
+        if (wasUp && Disconnected) Health.RecordDrop(_container, Label);
     }
 
     /// <summary>
@@ -3134,14 +3285,134 @@ class Silence
         string code = "0x" + hr.ToString("X8");
         switch (unchecked((uint)hr))
         {
+            // Values from audioclient.h. Getting one of these wrong is worse than
+            // printing the bare number, so they are spelled out in full here.
+            case 0x88890001: return code + " (AUDCLNT_E_NOT_INITIALIZED)";
+            case 0x88890003: return code + " (AUDCLNT_E_WRONG_ENDPOINT_TYPE)";
             case 0x88890004: return code + " (the speaker disconnected)";
-            case 0x88890001: return code + " (the output is in use exclusively)";
             case 0x88890008: return code + " (the output refused the format)";
-            case 0x8889000A: return code + " (the audio service is not running)";
+            case 0x8889000A: return code + " (another app has the output in exclusive mode)";
+            case 0x8889000E: return code + " (exclusive mode is not allowed on this output)";
+            case 0x8889000F: return code + " (Windows could not create the endpoint)";
+            case 0x88890010: return code + " (the Windows audio service is not running)";
             case 0x80070005: return code + " (access denied)";
             case 0x80004001: return code + " (not implemented by the driver)";
             default: return code;
         }
+    }
+
+    /// <summary>
+    /// True when the stream ended because the speaker went away, rather than because
+    /// something about the output refused it. The two want opposite things said about
+    /// them, so this reads the HRESULT rather than the sentence built from it.
+    /// </summary>
+    public bool Disconnected { get { return _hr == unchecked((int)0x88890004); } }
+}
+
+/// <summary>
+/// Watches for the things that stop this app working which this app cannot fix.
+///
+/// A speaker that drops its Bluetooth link every few minutes looks exactly like a speaker
+/// idling off: it goes quiet, and the app that was supposed to stop that gets the blame.
+/// The difference is only visible from here, because this is the one process holding a
+/// stream open and watching it die. So when the pattern is unmistakable, say so, and name
+/// the thing on the machine most likely to be causing it.
+///
+/// Nothing here is acted on automatically. Removing a Bluetooth adapter can take a mouse
+/// or a keyboard with it, and that is not a decision a tray app gets to make.
+/// </summary>
+static class Health
+{
+    // Three drops in an hour is past coincidence. A speaker that is switched off and on
+    // once, or carried out of range, must not produce advice.
+    const int DropsBeforeConcern = 3;
+    static readonly TimeSpan Window = TimeSpan.FromHours(1);
+
+    class Flapping { public string Name; public List<DateTime> At = new List<DateTime>(); }
+
+    /// <summary>A reading taken under the lock, safe to walk afterwards.</summary>
+    class Reading { public string Name; public int Count; }
+
+    static readonly Dictionary<Guid, Flapping> _drops = new Dictionary<Guid, Flapping>();
+    static readonly object _lock = new object();
+
+    /// <summary>Set once the user has been told, so the notification cannot nag.</summary>
+    public static bool Announced;
+
+    /// <summary>Called from the stream thread, so everything here is locked.</summary>
+    public static void RecordDrop(Guid container, string name)
+    {
+        if (container == Guid.Empty) return;
+        lock (_lock)
+        {
+            Flapping f;
+            if (!_drops.TryGetValue(container, out f)) _drops[container] = f = new Flapping();
+            f.Name = name;
+            f.At.Add(DateTime.UtcNow);
+
+            var cutoff = DateTime.UtcNow - Window;
+            f.At.RemoveAll(delegate (DateTime t) { return t < cutoff; });
+        }
+    }
+
+    /// <summary>The worst offender in the last hour, or null when nothing is wrong.</summary>
+    static Reading Worst()
+    {
+        lock (_lock)
+        {
+            Reading worst = null;
+            var cutoff = DateTime.UtcNow - Window;
+            foreach (var f in _drops.Values)
+            {
+                int n = f.At.FindAll(delegate (DateTime t) { return t >= cutoff; }).Count;
+                if (n < DropsBeforeConcern) continue;
+                if (worst == null || n > worst.Count)
+                    worst = new Reading { Name = f.Name, Count = n };
+            }
+            return worst;
+        }
+    }
+
+    /// <summary>
+    /// What to tell the user, or null when there is nothing to tell them.
+    ///
+    /// Silent unless a speaker is actually dropping. Plenty of machines have two Bluetooth
+    /// adapters and work perfectly well, and warning those users about a problem they do
+    /// not have would make every later warning easier to ignore.
+    /// </summary>
+    public static string Advice()
+    {
+        var worst = Worst();
+        if (worst == null) return null;
+
+        var lines = new List<string>();
+        lines.Add(worst.Name + " has disconnected " + worst.Count
+                  + " times in the last hour. Speaker Keeper reconnects it each time, but"
+                  + " the drops are the Bluetooth connection itself, not the app.");
+
+        List<DeviceProps.Radio> radios;
+        try { radios = DeviceProps.Radios(); }
+        catch { return string.Join(" ", lines.ToArray()); }
+
+        var broken = radios.FindAll(delegate (DeviceProps.Radio r) { return r.Problem != 0; });
+
+        if (radios.Count > 1)
+            lines.Add("This PC has " + radios.Count + " Bluetooth adapters attached and"
+                      + " Windows only ever uses one of them, chosen at startup. Removing"
+                      + " the one you are not using is the usual fix.");
+
+        foreach (var r in broken)
+            lines.Add(r.Name + " has a driver problem (code " + r.Problem
+                      + ") and is not being used.");
+
+        return string.Join(" ", lines.ToArray());
+    }
+
+    /// <summary>The adapters, for the line in Settings that lists them.</summary>
+    public static List<DeviceProps.Radio> Adapters()
+    {
+        try { return DeviceProps.Radios(); }
+        catch { return new List<DeviceProps.Radio>(); }
     }
 }
 
@@ -3161,7 +3432,21 @@ static class Keeper
     /// <summary>Speakers currently being held awake, by endpoint id.</summary>
     public static ICollection<string> Endpoints { get { return _held.Keys; } }
 
-    public static int Count { get { return _held.Count; } }
+    /// <summary>
+    /// Speakers actually being held right now. Not the number of streams on the books:
+    /// one that failed and is waiting out its backoff is counted by nobody, because
+    /// saying "keeping 1 awake" while nothing is being kept awake is the one thing the
+    /// status line must never do.
+    /// </summary>
+    public static int Count
+    {
+        get
+        {
+            int n = 0;
+            foreach (var s in _held.Values) if (s.Active) n++;
+            return n;
+        }
+    }
 
     public static bool Holding(string endpointId)
     {
@@ -3173,29 +3458,48 @@ static class Keeper
     /// Brings the set of live streams in line with the set of speakers that should be
     /// held. Called on every tick, so it is also what restarts a stream that died.
     /// </summary>
-    public static void Apply(Dictionary<string, string> wanted)
+    public static void Apply(List<DeviceProps.AudioDevice> wanted, DeviceProps.Snapshot snap)
     {
+        // One physical speaker can publish a live endpoint on each Bluetooth radio the PC
+        // has, so the same speaker can appear twice. Holding both would open two streams
+        // to one speaker. The endpoint Windows is actually playing through wins; failing
+        // that, the first one seen.
+        var byContainer = new Dictionary<Guid, DeviceProps.AudioDevice>();
+        foreach (var d in wanted)
+        {
+            DeviceProps.AudioDevice kept;
+            if (!byContainer.TryGetValue(d.Container, out kept) || d.IsDefault)
+                byContainer[d.Container] = d;
+        }
+
+        var keep = new Dictionary<string, DeviceProps.AudioDevice>(StringComparer.OrdinalIgnoreCase);
+        foreach (var d in byContainer.Values) keep[d.EndpointId] = d;
+
         foreach (var id in new List<string>(_held.Keys))
         {
-            if (wanted.ContainsKey(id)) continue;
+            if (keep.ContainsKey(id)) continue;
             var s = _held[id];
             _held.Remove(id);
-            Program.Log("letting " + s.Label + " sleep");
+            // A speaker that went away took its own stream down with it, and saying we
+            // are letting it sleep would read as a decision rather than a disconnection.
+            if (!s.Disconnected) Program.Log("letting " + s.Label + " sleep");
             s.Stop();
         }
 
-        foreach (var kv in wanted)
+        foreach (var kv in keep)
         {
+            string label = snap.NameOf(kv.Value);
+
             Silence s;
             if (!_held.TryGetValue(kv.Key, out s))
             {
-                _held[kv.Key] = s = new Silence(kv.Key, kv.Value);
+                _held[kv.Key] = s = new Silence(kv.Key, kv.Value.Container, label);
                 s.Start();
                 continue;
             }
 
-            s.Label = kv.Value;
-            if (s.Active) continue;
+            s.Label = label;
+            if (s.Active || !s.ReadyToRetry) continue;
 
             // Read this before Start(), which clears it. A speaker that dropped its
             // Bluetooth link and came straight back lands here, and the reason it went
@@ -3329,7 +3633,7 @@ static class Program
         var bt = snap.Of(d.Container);
         if (bt == null) { reason = "output device not identifiable"; return false; }
 
-        if (!d.IsA2dp) { reason = "this is the call channel, not the speaker"; return false; }
+        if (!snap.IsPlayable(d)) { reason = "this is the call channel, not the speaker"; return false; }
 
         DevicePolicy.Remember(d.Container, snap.NameOf(d), bt.ClassOfDevice);
 
@@ -3355,24 +3659,58 @@ static class Program
     static void ApplyPolicy()
     {
         var snap = DeviceProps.Read();
-        var wanted = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var wanted = new List<DeviceProps.AudioDevice>();
         string defaultReason = "no default output";
 
         foreach (var d in snap.Outputs)
         {
+            d.IsDefault = d.EndpointId == _lastDevice;
+
             string reason;
-            if (ShouldKeepAwake(d, snap, out reason)) wanted[d.EndpointId] = snap.NameOf(d);
-            if (d.EndpointId == _lastDevice) defaultReason = reason;
+            if (ShouldKeepAwake(d, snap, out reason)) wanted.Add(d);
+            if (d.IsDefault) defaultReason = reason;
         }
 
-        Keeper.Apply(wanted);
+        Keeper.Apply(wanted, snap);
 
         // What the tray says about the output you are actually listening through. The
         // other speakers being held are in the log and in Settings; the panel is about
-        // the one in front of you.
+        // the one in front of you. Only worth a log line when nothing at all is held:
+        // "idle" while two speakers are being kept awake would simply be untrue.
         string idle = Keeper.Holding(_lastDevice) ? null : defaultReason;
-        if (idle != null && idle != _idleReason) Log("idle - " + idle);
+        if (idle != null && idle != _idleReason && Keeper.Count == 0) Log("idle - " + idle);
         _idleReason = idle;
+
+        ReportHealth();
+    }
+
+    /// <summary>
+    /// Says once, plainly, when the machine rather than the app is the problem.
+    ///
+    /// Once per run: a speaker on a failing adapter drops all day, and a toast every time
+    /// would be worse than the fault. Settings keeps the same text for as long as it is
+    /// true, which is the copy that can be read at leisure.
+    /// </summary>
+    static void ReportHealth()
+    {
+        // The first policy run happens before the tray icon exists, and a balloon with
+        // nothing to anchor to is dropped by the shell without a word.
+        if (Health.Announced || _tray == null) return;
+
+        string advice = Health.Advice();
+        if (advice == null) return;
+
+        Health.Announced = true;
+        Log("diagnosis: " + advice);
+
+        try
+        {
+            _balloonClick = () => ShowSettings();
+            _tray.ShowBalloonTip(15000, "Your speaker keeps disconnecting",
+                advice.Length > 250 ? advice.Substring(0, 247) + "..." : advice,
+                ToolTipIcon.Warning);
+        }
+        catch (Exception ex) { Log("diagnosis notice failed: " + ex.Message); }
     }
 
     static string IcoPath { get { return Path.Combine(Dir, "SpeakerKeeper.ico"); } }

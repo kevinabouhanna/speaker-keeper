@@ -21,6 +21,43 @@ Added / Changed / Fixed / Removed / Security
 
 Nothing yet.
 
+## [1.5.0] - 2026-09-21
+
+### Added
+
+- **Speaker Keeper now tells you when the problem is not Speaker Keeper.** A Bluetooth
+  speaker that keeps dropping its connection looks exactly like a speaker idling off: it
+  goes quiet, and the app meant to prevent that gets the blame. When a speaker disconnects
+  three or more times in an hour, the app now says so by name and with a count, and names
+  the most likely cause on your machine: a second Bluetooth adapter, which Windows will
+  not use (it only ever drives one, chosen at startup), or an adapter whose driver has
+  failed. Settings carries the same text for as long as it is true. Nothing is changed for
+  you: removing a Bluetooth adapter can take a mouse or keyboard with it.
+- **Settings lists your Bluetooth adapters** when there is more than one, with the driver
+  problem code for any that is not working.
+
+### Fixed
+
+- **A speaker paired to two Bluetooth adapters is no longer held awake twice.** It can
+  publish a separate output on each adapter, and both were being kept alive. The one
+  Windows is actually playing through wins.
+- **A stream that cannot start is no longer retried every five seconds forever.** If
+  another app holds the output exclusively, or a driver refuses it, the wait now doubles
+  from 5 seconds up to 5 minutes and resets the moment the stream comes up. It was
+  rebuilding the stream and writing a log line every tick, indefinitely.
+- **Speakers on an unrecognised Bluetooth stack are kept awake again.** 1.4.0 identified
+  a speaker's music channel by its position in the device tree, and anything that did not
+  match was skipped as if it were the call channel. A speaker that publishes no channel
+  the app recognises is now kept awake rather than silently ignored, while the call
+  channel is still never touched.
+- **Three error descriptions in the log were wrong.** `0x88890001` and `0x8889000A` were
+  labelled as exclusive-mode and audio-service failures; they are actually
+  `NOT_INITIALIZED` and another app holding the output exclusively, and the audio service
+  one is `0x88890010`.
+- **The status no longer says "Idle" while speakers are being kept awake.** With more than
+  one speaker, the tray panel and the log both reported on the current output alone, so
+  the app looked idle while it was holding another speaker awake in the background.
+
 ## [1.4.0] - 2026-09-21
 
 ### Added
@@ -185,7 +222,8 @@ First public release.
 - Follows the default output device when you switch speakers.
 - Per-speaker on/off, a live log viewer, start-with-Windows, and opt-in auto-updates.
 
-[Unreleased]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.3.2...v1.4.0
 [1.3.2]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.3.0...v1.3.1
