@@ -3367,15 +3367,28 @@ class Silence
 /// </summary>
 static class Health
 {
-    // Three drops in an hour is past coincidence. A speaker that is switched off and on
-    // once, or carried out of range, must not produce advice.
-    const int DropsBeforeConcern = 3;
-    static readonly TimeSpan Window = TimeSpan.FromHours(1);
+    /// <summary>
+    /// What counts as "this keeps happening".
+    ///
+    /// Two rules rather than one. Three drops in an hour is obviously broken, but so is a
+    /// speaker that drops every couple of hours all evening, and a single one-hour window
+    /// never sees the second: it only ever holds one of them. A speaker switched off by
+    /// hand once or twice trips neither.
+    /// </summary>
+    struct Rule { public int Drops; public TimeSpan Within; }
+
+    static readonly Rule[] Rules =
+    {
+        new Rule { Drops = 3, Within = TimeSpan.FromHours(1) },
+        new Rule { Drops = 4, Within = TimeSpan.FromHours(6) },
+    };
+
+    static readonly TimeSpan Window = TimeSpan.FromHours(6);   // longest rule; what we keep
 
     class Flapping { public string Name; public List<DateTime> At = new List<DateTime>(); }
 
     /// <summary>A reading taken under the lock, safe to walk afterwards.</summary>
-    class Reading { public string Name; public int Count; }
+    class Reading { public string Name; public int Count; public TimeSpan Within; }
 
     static readonly Dictionary<Guid, Flapping> _drops = new Dictionary<Guid, Flapping>();
     static readonly object _lock = new object();
@@ -3405,14 +3418,15 @@ static class Health
         lock (_lock)
         {
             Reading worst = null;
-            var cutoff = DateTime.UtcNow - Window;
             foreach (var f in _drops.Values)
-            {
-                int n = f.At.FindAll(delegate (DateTime t) { return t >= cutoff; }).Count;
-                if (n < DropsBeforeConcern) continue;
-                if (worst == null || n > worst.Count)
-                    worst = new Reading { Name = f.Name, Count = n };
-            }
+                foreach (var rule in Rules)
+                {
+                    var cutoff = DateTime.UtcNow - rule.Within;
+                    int n = f.At.FindAll(delegate (DateTime t) { return t >= cutoff; }).Count;
+                    if (n < rule.Drops) continue;
+                    if (worst == null || n > worst.Count)
+                        worst = new Reading { Name = f.Name, Count = n, Within = rule.Within };
+                }
             return worst;
         }
     }
@@ -3430,9 +3444,10 @@ static class Health
         if (worst == null) return null;
 
         var lines = new List<string>();
-        lines.Add(worst.Name + " has disconnected " + worst.Count
-                  + " times in the last hour. Speaker Keeper reconnects it each time, but"
-                  + " the drops are the Bluetooth connection itself, not the app.");
+        lines.Add(worst.Name + " has disconnected " + worst.Count + " times in the last "
+                  + (worst.Within.TotalHours <= 1 ? "hour" : worst.Within.TotalHours + " hours")
+                  + ". Speaker Keeper reconnects it each time, but the drops are the"
+                  + " Bluetooth connection itself, not the app.");
 
         List<DeviceProps.Radio> radios;
         try { radios = DeviceProps.Radios(); }
@@ -3519,14 +3534,38 @@ static class Keeper
         var keep = new Dictionary<string, DeviceProps.AudioDevice>(StringComparer.OrdinalIgnoreCase);
         foreach (var d in byContainer.Values) keep[d.EndpointId] = d;
 
+        // Endpoints that still exist at all, whether or not we want to hold them. An
+        // endpoint we were holding that is no longer in this set did not stop being
+        // wanted: it went away underneath us.
+        var present = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var d in snap.Outputs) present.Add(d.EndpointId);
+
         foreach (var id in new List<string>(_held.Keys))
         {
             if (keep.ContainsKey(id)) continue;
             var s = _held[id];
             _held.Remove(id);
-            // A speaker that went away took its own stream down with it, and saying we
-            // are letting it sleep would read as a decision rather than a disconnection.
-            if (!s.Disconnected) Program.Log("letting " + s.Label + " sleep");
+
+            if (s.Disconnected)
+            {
+                // The stream already noticed and said so. Nothing to add.
+            }
+            else if (!present.Contains(id))
+            {
+                // A disconnection this tick saw before the stream thread did. The stream
+                // polls every 500ms and the policy runs every 5s, so whenever a speaker
+                // vanishes in that last half second it is Stop() that ends the stream,
+                // cleanly, and nothing ever records a failure. Left unhandled this reads
+                // in the log as a decision the app made, and never reaches the count that
+                // decides whether the user is told their speaker keeps dropping.
+                Program.Log(s.Label + ": the speaker disconnected");
+                Health.RecordDrop(s.Container, s.Label);
+            }
+            else
+            {
+                Program.Log("letting " + s.Label + " sleep");
+            }
+
             s.Stop();
         }
 
