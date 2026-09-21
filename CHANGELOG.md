@@ -19,6 +19,10 @@ Added / Changed / Fixed / Removed / Security
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [1.5.1] - 2026-09-22
+
 ### Fixed
 
 - **A disconnection is no longer sometimes recorded as a decision.** When a speaker
@@ -237,7 +241,8 @@ First public release.
 - Follows the default output device when you switch speakers.
 - Per-speaker on/off, a live log viewer, start-with-Windows, and opt-in auto-updates.
 
-[Unreleased]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.5.1...HEAD
+[1.5.1]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.3.2...v1.4.0
 [1.3.2]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.3.1...v1.3.2
