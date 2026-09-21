@@ -1,19 +1,19 @@
 {
-  "version": "1.4.0",
+  "version": "1.5.0",
   "files": [
     {
       "name": "SpeakerKeeper.exe",
-      "url": "https://github.com/kevinabouhanna/speaker-keeper/releases/download/v1.4.0/SpeakerKeeper.exe",
-      "sha256": "74C77708C40BD634C3139AC6023660D869C8C6145E017BCB57A518E607F43BED"
+      "url": "https://github.com/kevinabouhanna/speaker-keeper/releases/download/v1.5.0/SpeakerKeeper.exe",
+      "sha256": "A46E04F84DE1BB239E669A8F6B2185B9AC8EDF51DFBE679C225685F782D8EB79"
     },
     {
       "name": "Uninstall.exe",
-      "url": "https://github.com/kevinabouhanna/speaker-keeper/releases/download/v1.4.0/Uninstall.exe",
-      "sha256": "8DD69687D44A4CBF98F754EA0E88CCA48B10B7963D2EE11D2B44F0631704E874"
+      "url": "https://github.com/kevinabouhanna/speaker-keeper/releases/download/v1.5.0/Uninstall.exe",
+      "sha256": "846757524B69423EDF9FD9D680FC4780193982AAC0B0CFACA582D30C29D8C478"
     },
     {
       "name": "update.ps1",
-      "url": "https://github.com/kevinabouhanna/speaker-keeper/releases/download/v1.4.0/update.ps1",
+      "url": "https://github.com/kevinabouhanna/speaker-keeper/releases/download/v1.5.0/update.ps1",
       "sha256": "E6A7F83B7337BC63A3FAE99F2B90417B92F0F276253FFA5F585B3812ECCC5CCC"
     }
   ]
