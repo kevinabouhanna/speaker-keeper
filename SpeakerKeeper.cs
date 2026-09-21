@@ -22,25 +22,40 @@ using System.Windows.Forms;
 [assembly: AssemblyDescription("Keeps a Bluetooth speaker awake with a silent audio stream")]
 [assembly: AssemblyCompany("Kevin Abou Hanna")]
 [assembly: AssemblyCopyright("Copyright (c) Kevin Abou Hanna")]
-[assembly: AssemblyVersion("1.3.2.0")]
-[assembly: AssemblyFileVersion("1.3.2.0")]
+[assembly: AssemblyVersion("1.4.0.0")]
+[assembly: AssemblyFileVersion("1.4.0.0")]
 
 [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
 class MMDeviceEnumeratorClass { }
 
+// [PreserveSig] on every method, without exception.
+//
+// Without it the CLR treats the declared int as a [retval] and turns a failing
+// HRESULT into an exception, which makes every "if (hr != 0)" below dead code and
+// reduces a diagnosable fault to whatever text the exception happens to carry - a
+// Bluetooth endpoint being torn down logged as a bare "Not implemented", with no
+// code and no clue which call produced it.
 [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 interface IMMDeviceEnumerator
 {
+    [PreserveSig]
     int EnumAudioEndpoints(int dataFlow, int stateMask, out IntPtr devices);
+    [PreserveSig]
     int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice device);
+    [PreserveSig]
+    int GetDevice([MarshalAs(UnmanagedType.LPWStr)] string id, out IMMDevice device);
 }
 
 [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 interface IMMDevice
 {
+    [PreserveSig]
     int Activate(ref Guid iid, int clsCtx, IntPtr activationParams, [MarshalAs(UnmanagedType.IUnknown)] out object iface);
+    [PreserveSig]
     int OpenPropertyStore(int access, out IntPtr store);
+    [PreserveSig]
     int GetId([MarshalAs(UnmanagedType.LPWStr)] out string id);
+    [PreserveSig]
     int GetState(out int state);
 }
 
@@ -51,25 +66,39 @@ interface IMMDevice
 [ComImport, Guid("1CB9AD4C-DBFA-4C32-B178-C2F568A703B2"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 interface IAudioClient
 {
+    [PreserveSig]
     int Initialize(int shareMode, int streamFlags, long bufferDuration, long periodicity,
                    IntPtr format, ref Guid sessionGuid);
+    [PreserveSig]
     int GetBufferSize(out uint frames);
+    [PreserveSig]
     int GetStreamLatency(out long latency);
+    [PreserveSig]
     int GetCurrentPadding(out uint frames);
+    [PreserveSig]
     int IsFormatSupported(int shareMode, IntPtr format, out IntPtr closest);
+    [PreserveSig]
     int GetMixFormat(out IntPtr format);
+    [PreserveSig]
     int GetDevicePeriod(out long defaultPeriod, out long minPeriod);
+    [PreserveSig]
     int Start();
+    [PreserveSig]
     int Stop();
+    [PreserveSig]
     int Reset();
+    [PreserveSig]
     int SetEventHandle(IntPtr handle);
+    [PreserveSig]
     int GetService(ref Guid iid, [MarshalAs(UnmanagedType.IUnknown)] out object iface);
 }
 
 [ComImport, Guid("F294ACFC-3146-4483-A7BF-ADDCA7C260E2"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 interface IAudioRenderClient
 {
+    [PreserveSig]
     int GetBuffer(uint frames, out IntPtr data);
+    [PreserveSig]
     int ReleaseBuffer(uint frames, int flags);
 }
 
@@ -99,6 +128,12 @@ static class DeviceProps
     // last reading the device pushed.
     static readonly DEVPROPKEY BluetoothBattUpdated = new DEVPROPKEY("104ea319-6ee2-4701-bd47-8ddbf425bbe5", 7);
     static readonly DEVPROPKEY FriendlyName  = new DEVPROPKEY("a45c254e-df1c-4efd-8020-67d146a850e0", 14);
+    // The devnode an endpoint hangs off. For a Bluetooth output that is either the A2DP
+    // sink or the Hands-Free node, which is how the two are told apart - see IsA2dp.
+    static readonly DEVPROPKEY Parent        = new DEVPROPKEY("4340a6c5-93fa-4706-972c-7b648008a5a7", 8);
+    // Bluetooth Class of Device: what the device says it is. Used instead of the endpoint
+    // name because the name is localised and this is three bits of a number.
+    static readonly DEVPROPKEY ClassOfDevice = new DEVPROPKEY("2bd67d8b-8beb-48d5-87e0-6cda3428040a", 10);
 
     [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
     static extern uint CM_Locate_DevNodeW(out uint devInst, string deviceId, uint flags);
@@ -167,6 +202,85 @@ static class DeviceProps
         public Guid Container;         // stable per physical device - what settings key off
         public bool IsBluetooth;
         public bool Present = true;
+
+        /// <summary>
+        /// True for the endpoint that actually plays music.
+        ///
+        /// One Bluetooth speaker publishes two render endpoints: the A2DP sink, which is
+        /// stereo and is what "Speakers (X)" means, and the Hands-Free one, which is the
+        /// mono call channel. Holding a stream open on the Hands-Free endpoint would put
+        /// the speaker into call mode and make music sound like a phone, so only the A2DP
+        /// one is ever kept awake. They are told apart by their parent devnode - the A2DP
+        /// sink's carries the AudioSink UUID - because the names are localised.
+        /// </summary>
+        public bool IsA2dp;
+    }
+
+    /// <summary>A paired Bluetooth device, and what it says it is.</summary>
+    public class BluetoothDevice
+    {
+        public string Name;
+        public uint ClassOfDevice;
+
+        /// <summary>A headset, a speaker, anything whose job is sound. Not a mouse.</summary>
+        public bool IsAudio { get { return ((ClassOfDevice >> 8) & 0x1F) == 4; } }
+
+        /// <summary>
+        /// Whether this is something worth holding awake.
+        ///
+        /// Earbuds and headsets SHOULD power off when they are put away, so keeping them
+        /// awake would flatten them in a drawer. The Class of Device says which is which:
+        /// major class 4 is audio, and its minor class separates a loudspeaker from a pair
+        /// of headphones. A device that reports nothing is treated as a speaker, because
+        /// the app's whole job is to keep speakers awake and refusing to act on a silent
+        /// device would be the worse failure.
+        /// </summary>
+        public bool IsSpeaker
+        {
+            get
+            {
+                if (ClassOfDevice == 0) return true;
+                uint major = (ClassOfDevice >> 8) & 0x1F;
+                if (major != 4) return true;
+                switch ((ClassOfDevice >> 2) & 0x3F)
+                {
+                    case 1:  // wearable headset
+                    case 2:  // hands-free
+                    case 4:  // microphone
+                    case 6:  // headphones
+                        return false;
+                    default:
+                        return true;
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Every output and every paired Bluetooth device, read in one pass.
+    ///
+    /// Read as a set rather than queried one property at a time because the policy runs
+    /// every five seconds and each lookup walks the device tree: asking three separate
+    /// questions meant three walks a tick, and the answers could disagree with each other
+    /// halfway through a speaker connecting.
+    /// </summary>
+    public class Snapshot
+    {
+        public List<AudioDevice> Outputs = new List<AudioDevice>();
+        public Dictionary<Guid, BluetoothDevice> Bluetooth = new Dictionary<Guid, BluetoothDevice>();
+
+        public BluetoothDevice Of(Guid container)
+        {
+            BluetoothDevice d;
+            return Bluetooth.TryGetValue(container, out d) ? d : null;
+        }
+
+        /// <summary>The speaker's own name, rather than the endpoint's.</summary>
+        public string NameOf(AudioDevice d)
+        {
+            var bt = Of(d.Container);
+            return bt != null && !string.IsNullOrEmpty(bt.Name) ? bt.Name : d.Name;
+        }
     }
 
     public static bool TryContainer(string endpointId, out Guid container)
@@ -183,19 +297,33 @@ static class DeviceProps
         return "SWD" + (char)92 + "MMDEVAPI" + (char)92 + endpointId;
     }
 
-    /// <summary>
-    /// Bluetooth devices by ContainerId, with the name of the physical device.
-    ///
-    /// One speaker publishes several nodes - A2DP, Hands-Free, AVRCP - that all share a
-    /// container. The name is taken from the device root node ("BTHENUM\DEV_...", whose
-    /// FriendlyName is "Xiaomi Sound Pocket") in preference to a per-profile node
-    /// ("... Hands-Free AG"), so the UI shows the speaker rather than one of its profiles.
-    /// </summary>
-    public static Dictionary<Guid, string> BluetoothDevices()
+    static string StringProperty(string instanceId, DEVPROPKEY key)
     {
-        var map = new Dictionary<Guid, string>();
+        var raw = GetProperty(instanceId, key);
+        return raw == null ? null : System.Text.Encoding.Unicode.GetString(raw).TrimEnd('\0');
+    }
+
+    /// <summary>
+    /// Every present render endpoint, and every Bluetooth device behind them.
+    ///
+    /// Enumerated through cfgmgr32 rather than IMMDeviceEnumerator so it reuses the same
+    /// property plumbing as the battery lookup - render endpoints are the SWD\MMDEVAPI
+    /// nodes whose id carries the {0.0.0.*} data-flow prefix ({0.0.1.*} would be capture).
+    ///
+    /// Devices that are paired but not connected drop out on their own: CM_Locate_DevNodeW
+    /// is asked for present devnodes only, so every property of an absent one reads back
+    /// null and it never reaches the list.
+    /// </summary>
+    public static Snapshot Read()
+    {
+        var snap = new Snapshot();
         var fromRoot = new HashSet<Guid>();
 
+        // One speaker publishes several nodes - A2DP, Hands-Free, AVRCP - that all share a
+        // container. The name and the Class of Device are taken from the device root node
+        // ("BTHENUM\DEV_...", whose FriendlyName is "Xiaomi Sound Pocket") in preference to
+        // a per-profile node ("... Hands-Free AG"), so the UI shows the speaker rather than
+        // one of its profiles, and the class describes the speaker rather than the profile.
         foreach (var enumerator in new[] { "BTHENUM", "BTHLE", "BTHHFENUM" })
             foreach (var id in DeviceIds(enumerator))
             {
@@ -204,44 +332,25 @@ static class DeviceProps
                 var container = new Guid(c);
 
                 bool isRoot = id.IndexOf((char)92 + "DEV_", StringComparison.OrdinalIgnoreCase) >= 0;
-                if (map.ContainsKey(container) && (fromRoot.Contains(container) || !isRoot)) continue;
+                if (fromRoot.Contains(container) && !isRoot) continue;
 
-                var nameRaw = GetProperty(id, FriendlyName);
-                string name = nameRaw == null
-                    ? null
-                    : System.Text.Encoding.Unicode.GetString(nameRaw).TrimEnd('\0');
-                if (string.IsNullOrEmpty(name)) continue;
+                BluetoothDevice dev;
+                if (!snap.Bluetooth.TryGetValue(container, out dev))
+                    snap.Bluetooth[container] = dev = new BluetoothDevice();
 
-                map[container] = name;
+                var name = StringProperty(id, FriendlyName);
+                if (!string.IsNullOrEmpty(name) && (isRoot || string.IsNullOrEmpty(dev.Name)))
+                    dev.Name = name;
+
+                var cod = GetProperty(id, ClassOfDevice);
+                if (cod != null && cod.Length >= 4)
+                {
+                    uint v = BitConverter.ToUInt32(cod, 0);
+                    if (v != 0 && (isRoot || dev.ClassOfDevice == 0)) dev.ClassOfDevice = v;
+                }
+
                 if (isRoot) fromRoot.Add(container);
             }
-
-        return map;
-    }
-
-    /// <summary>ContainerIds of everything currently attached over Bluetooth.</summary>
-    public static HashSet<Guid> BluetoothContainers()
-    {
-        var set = new HashSet<Guid>();
-        foreach (var enumerator in new[] { "BTHENUM", "BTHLE", "BTHHFENUM" })
-            foreach (var id in DeviceIds(enumerator))
-            {
-                var c = GetProperty(id, ContainerId);
-                if (c != null && c.Length >= 16) set.Add(new Guid(c));
-            }
-        return set;
-    }
-
-    /// <summary>
-    /// Every render (playback) endpoint currently present. Enumerated through cfgmgr32
-    /// rather than IMMDeviceEnumerator so it reuses the same property plumbing as the
-    /// battery lookup - render endpoints are the SWD\MMDEVAPI nodes whose id carries the
-    /// {0.0.0.*} data-flow prefix ({0.0.1.*} would be capture).
-    /// </summary>
-    public static List<AudioDevice> RenderEndpoints()
-    {
-        var bt = BluetoothContainers();
-        var list = new List<AudioDevice>();
 
         foreach (var id in DeviceIds("SWD"))
         {
@@ -253,20 +362,21 @@ static class DeviceProps
 
             var dev = new AudioDevice();
             dev.EndpointId = endpointId;
-
-            var nameRaw = GetProperty(id, FriendlyName);
-            dev.Name = nameRaw == null
-                ? endpointId
-                : System.Text.Encoding.Unicode.GetString(nameRaw).TrimEnd('\0');
+            dev.Name = StringProperty(id, FriendlyName) ?? endpointId;
 
             var c = GetProperty(id, ContainerId);
             if (c != null && c.Length >= 16) dev.Container = new Guid(c);
 
-            dev.IsBluetooth = dev.Container != Guid.Empty && bt.Contains(dev.Container);
-            list.Add(dev);
+            dev.IsBluetooth = dev.Container != Guid.Empty && snap.Bluetooth.ContainsKey(dev.Container);
+
+            var parent = StringProperty(id, Parent);
+            dev.IsA2dp = parent != null
+                && parent.IndexOf("{0000110b", StringComparison.OrdinalIgnoreCase) >= 0;
+
+            snap.Outputs.Add(dev);
         }
 
-        return list;
+        return snap;
     }
 
     /// <summary>Battery percent of the default output device, or -1 when it doesn't report one.</summary>
@@ -1933,9 +2043,11 @@ class OutputStatus
     public string Name = "No output";
     public Guid Container;
     public bool Bluetooth;
+    public bool IsSpeaker = true;
     public int Battery = -1;
     public string Charge = "";
     public bool KeepingAwake;
+    public int AlsoHeld;
     public string IdleReason;
 }
 
@@ -2054,7 +2166,7 @@ class TrayFlyout : Form
     public void Bind(OutputStatus s)
     {
         _s = s;
-        _keep.SetSilently(s.Container == Guid.Empty || DevicePolicy.IsEnabled(s.Container));
+        _keep.SetSilently(s.Container == Guid.Empty || DevicePolicy.IsEnabled(s.Container, s.IsSpeaker));
         _keep.Enabled = s.Bluetooth && s.Container != Guid.Empty;
         _keep.Visible = _keep.Enabled;
         Invalidate();
@@ -2133,6 +2245,10 @@ class TrayFlyout : Form
         string status = _s.KeepingAwake ? "Keeping awake" : "Idle";
         if (_s.Battery >= 0)
             status += "  ·  " + _s.Battery + "%" + (string.IsNullOrEmpty(_s.Charge) ? "" : " " + _s.Charge);
+        // The panel names the output you are listening through, so a speaker held awake
+        // in the background would otherwise be invisible until you switched to it.
+        if (_s.AlsoHeld > 0)
+            status += "  ·  +" + _s.AlsoHeld + " more";
 
         Fluent.Draw(g, status, Fluent.Caption, Fluent.TextSecondary,
             new Rectangle(Pad + 36, Pad + 22, W - Pad * 2 - 36, 18), left);
@@ -2523,27 +2639,50 @@ class SettingsForm : Form
         var rows = new List<SettingsCard>();
         try
         {
-            // Name rows after the physical Bluetooth device, not the audio endpoint: one
-            // speaker exposes both "Speakers (X)" and "Headset Earphone (X Hands-Free)".
-            var btNames = DeviceProps.BluetoothDevices();
+            // Rows are named after the physical Bluetooth device, not the audio endpoint:
+            // one speaker exposes both "Speakers (X)" and "Headset Earphone (X Hands-Free)",
+            // and only the first of those is a thing the user chose to own.
+            var snap = DeviceProps.Read();
 
-            foreach (var d in DeviceProps.RenderEndpoints())
+            foreach (var d in snap.Outputs)
             {
-                if (!d.IsBluetooth || d.Container == Guid.Empty) continue;
+                if (!d.IsBluetooth || !d.IsA2dp || d.Container == Guid.Empty) continue;
                 if (!seen.Add(d.Container)) continue;
 
-                string name;
-                if (!btNames.TryGetValue(d.Container, out name) || string.IsNullOrEmpty(name))
-                    name = d.Name;
+                var bt = snap.Of(d.Container);
+                string name = snap.NameOf(d);
 
-                DevicePolicy.Remember(d.Container, name);
-                rows.Add(DeviceRow(d.Container, name, true));
+                DevicePolicy.Remember(d.Container, name, bt == null ? 0 : bt.ClassOfDevice);
+                rows.Add(DeviceRow(d.Container, name, true, bt == null || bt.IsSpeaker));
             }
 
+            // A device that is paired but not connected still publishes its root node, so
+            // its Class of Device is readable here even though it has no endpoint. Worth
+            // storing: without it a pair of earbuds remembered by an older version would
+            // sit in this list switched on until the next time they were connected.
             foreach (var r in DevicePolicy.All())
             {
                 if (!seen.Add(r.Container)) continue;
-                rows.Add(DeviceRow(r.Container, r.Name, false));
+
+                var bt = snap.Of(r.Container);
+                if (bt != null && bt.ClassOfDevice != 0)
+                {
+                    DevicePolicy.Remember(r.Container, r.Name, bt.ClassOfDevice);
+                    rows.Add(DeviceRow(r.Container, r.Name, false, bt.IsSpeaker));
+                    continue;
+                }
+
+                rows.Add(DeviceRow(r.Container, r.Name, false, r.IsSpeaker));
+            }
+
+            // Paired but never yet connected while the app was running. Listing them means
+            // a second speaker can be switched on before it is plugged in for the first
+            // time, rather than appearing only once it is too late to be useful.
+            foreach (var kv in snap.Bluetooth)
+            {
+                if (!kv.Value.IsAudio || string.IsNullOrEmpty(kv.Value.Name)) continue;
+                if (!seen.Add(kv.Key)) continue;
+                rows.Add(DeviceRow(kv.Key, kv.Value.Name, false, kv.Value.IsSpeaker));
             }
         }
         catch { }
@@ -2560,18 +2699,24 @@ class SettingsForm : Form
         _speakers.PerformLayout();
     }
 
-    SettingsCard DeviceRow(Guid container, string name, bool present)
+    SettingsCard DeviceRow(Guid container, string name, bool present, bool isSpeaker)
     {
         var toggle = new ToggleSwitch();
-        toggle.SetSilently(DevicePolicy.IsEnabled(container));
+        toggle.SetSilently(DevicePolicy.IsEnabled(container, isSpeaker));
         toggle.Toggled += (s, e) =>
         {
             DevicePolicy.SetEnabled(container, name, toggle.On);
             // Let the tray re-evaluate straight away rather than waiting for the next tick.
             BeginInvoke(new Action(Raise));
         };
-        var card = Card(Fluent.IconVolume, name,
-            present ? "Connected" : "Not connected right now", toggle);
+
+        // Earbuds are off by default and say why, since a row that is simply off looks
+        // like something the user did. The switch still works: a speaker that reports
+        // itself as headphones can be turned on and stays on.
+        string note = present ? "Connected" : "Not connected right now";
+        if (!isSpeaker) note += "  ·  Earbuds, left to sleep unless you turn this on";
+
+        var card = Card(Fluent.IconVolume, name, note, toggle);
         card.Muted = !present;
         return card;
     }
@@ -2634,24 +2779,49 @@ static class DevicePolicy
         public Guid Container;
         public string Name;
         public bool Enabled;
+        public bool IsSpeaker = true;
     }
 
     static string Sub(Guid container) { return Key + "\\" + container.ToString("B"); }
 
-    /// <summary>Bluetooth devices default to enabled; that is the whole point of the app.</summary>
-    public static bool IsEnabled(Guid container)
+    /// <summary>
+    /// Whether this device should be kept awake.
+    ///
+    /// Unset means "whatever suits this kind of device": a speaker defaults to on, since
+    /// that is the whole point of the app, and earbuds default to off, since they are
+    /// supposed to sleep when they are put away. A stored value always wins, so a user who
+    /// turns a device on has said something the classification cannot overrule - which
+    /// matters for the speaker that reports itself as headphones.
+    /// </summary>
+    public static bool IsEnabled(Guid container, bool byDefault)
     {
-        if (container == Guid.Empty) return true;
+        if (container == Guid.Empty) return byDefault;
         try
         {
             using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(Sub(container)))
             {
-                if (k == null) return true;
-                var v = k.GetValue("Enabled");
-                return v == null || Convert.ToInt32(v) != 0;
+                return Resolve(k, byDefault);
             }
         }
-        catch { return true; }
+        catch { return byDefault; }
+    }
+
+    /// <summary>
+    /// The stored answer, or the default for this kind of device.
+    ///
+    /// Versions up to 1.3.2 wrote Enabled=1 the first time they saw any device, so a 1 on
+    /// its own does not mean the user asked for anything - and on a pair of earbuds it is
+    /// exactly the setting this version is trying to stop applying. Only a value written
+    /// by the switch carries the Chosen marker, and only that is allowed to override the
+    /// default. A 0 is honoured either way: nothing ever wrote one but the switch.
+    /// </summary>
+    static bool Resolve(Microsoft.Win32.RegistryKey k, bool byDefault)
+    {
+        if (k == null) return byDefault;
+        var v = k.GetValue("Enabled");
+        if (v == null) return byDefault;
+        if (Convert.ToInt32(v) == 0) return false;
+        return k.GetValue("Chosen") != null || byDefault;
     }
 
     public static void SetEnabled(Guid container, string name, bool enabled)
@@ -2663,24 +2833,36 @@ static class DevicePolicy
             {
                 if (k == null) return;
                 k.SetValue("Enabled", enabled ? 1 : 0, Microsoft.Win32.RegistryValueKind.DWord);
+                // Marks this as the user's answer rather than one an old version wrote
+                // on its own. See Resolve.
+                k.SetValue("Chosen", 1, Microsoft.Win32.RegistryValueKind.DWord);
                 if (!string.IsNullOrEmpty(name)) k.SetValue("Name", name);
             }
         }
         catch { }
     }
 
-    /// <summary>Records a device we've seen, so it can still be listed when disconnected.</summary>
-    public static void Remember(Guid container, string name)
+    /// <summary>
+    /// Records a device we've seen, so it can still be listed when disconnected.
+    ///
+    /// The name only. Deliberately does not write Enabled: leaving it unset is what lets
+    /// IsEnabled fall back to what suits the kind of device, and an earlier version that
+    /// wrote 1 here froze that answer in the registry the first time a device appeared.
+    /// </summary>
+    public static void Remember(Guid container, string name, uint classOfDevice)
     {
-        if (container == Guid.Empty) return;
+        if (container == Guid.Empty || string.IsNullOrEmpty(name)) return;
         try
         {
             using (var k = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(Sub(container)))
             {
                 if (k == null) return;
-                if (k.GetValue("Enabled") == null)
-                    k.SetValue("Enabled", 1, Microsoft.Win32.RegistryValueKind.DWord);
-                if (!string.IsNullOrEmpty(name)) k.SetValue("Name", name);
+                k.SetValue("Name", name);
+                // Kept so a device that is listed while disconnected still shows the right
+                // default: the Class of Device is only readable while it is attached.
+                if (classOfDevice != 0)
+                    k.SetValue("Class", unchecked((int)classOfDevice),
+                               Microsoft.Win32.RegistryValueKind.DWord);
             }
         }
         catch { }
@@ -2703,12 +2885,17 @@ static class DevicePolicy
                         using (var k = root.OpenSubKey(name))
                         {
                             if (k == null) continue;
-                            var v = k.GetValue("Enabled");
+                            var c = k.GetValue("Class");
+                            bool speaker = c == null ||
+                                new DeviceProps.BluetoothDevice
+                                { ClassOfDevice = unchecked((uint)Convert.ToInt32(c)) }.IsSpeaker;
+
                             list.Add(new Remembered
                             {
                                 Container = g,
                                 Name = (k.GetValue("Name") as string) ?? g.ToString("B"),
-                                Enabled = v == null || Convert.ToInt32(v) != 0,
+                                Enabled = Resolve(k, speaker),
+                                IsSpeaker = speaker,
                             });
                         }
                     }
@@ -2735,7 +2922,7 @@ static class DevicePolicy
 /// apartment-bound, so they must not be created on the WinForms STA thread and then
 /// fed from somewhere else.
 /// </summary>
-static class Silence
+class Silence
 {
     const int ShareModeShared = 0;
     const int ClsCtxAll = 23;
@@ -2763,21 +2950,34 @@ static class Silence
 
     enum State { Idle, Starting, Running, Failed }
 
-    static volatile State _state = State.Idle;
-    static Thread _thread;
-    static ManualResetEvent _stop;
-    static DateTime _startedAt;
-    static volatile string _error;
+    volatile State _state = State.Idle;
+    Thread _thread;
+    ManualResetEvent _stop;
+    DateTime _startedAt;
+    volatile string _error;
+
+    readonly string _endpointId;
+
+    /// <summary>What to call this speaker in the log. Only ever used for that.</summary>
+    public string Label;
+
+    public Silence(string endpointId, string label)
+    {
+        _endpointId = endpointId;
+        Label = label;
+    }
+
+    public string EndpointId { get { return _endpointId; } }
 
     /// <summary>Why the last stream stopped, or null if it stopped because we said so.</summary>
-    public static string LastError { get { return _error; } }
+    public string LastError { get { return _error; } }
 
     /// <summary>
     /// True while the stream is up, or still coming up. A start that never completes -
     /// a wedged audio driver - stops counting as healthy, so the caller retries instead
     /// of waiting forever on a stream that is never going to arrive.
     /// </summary>
-    public static bool Active
+    public bool Active
     {
         get
         {
@@ -2787,7 +2987,7 @@ static class Silence
         }
     }
 
-    public static void Start()
+    public void Start()
     {
         Stop();
         _error = null;
@@ -2801,7 +3001,7 @@ static class Silence
         _thread.Start();
     }
 
-    public static void Stop()
+    public void Stop()
     {
         var t = _thread;
         if (t == null) { _state = State.Idle; return; }
@@ -2815,7 +3015,7 @@ static class Silence
         _state = State.Idle;
     }
 
-    static void Run()
+    void Run()
     {
         IntPtr fmt = IntPtr.Zero;
         object en = null, dev = null, client = null, render = null;
@@ -2823,8 +3023,13 @@ static class Silence
         {
             en = new MMDeviceEnumeratorClass();
             IMMDevice endpoint;
-            if (((IMMDeviceEnumerator)en).GetDefaultAudioEndpoint(0, 0, out endpoint) != 0 || endpoint == null)
-            { Fail("no default output"); return; }
+
+            // By id, not "the default output": the app holds every speaker the user asked
+            // it to, and only one of them can be the default. Opening the default here
+            // would also race the policy - the default can change between the decision to
+            // hold a speaker and this thread getting as far as opening it.
+            int opened = ((IMMDeviceEnumerator)en).GetDevice(_endpointId, out endpoint);
+            if (opened != 0 || endpoint == null) { Fail("open device " + Hex(opened)); return; }
             dev = endpoint;
 
             var iid = typeof(IAudioClient).GUID;
@@ -2860,7 +3065,7 @@ static class Silence
             if (hr != 0) { Fail("start " + Hex(hr)); return; }
 
             _state = State.Running;
-            Program.Log("silent stream started (hidden session, no transport controls)");
+            Program.Log("keeping " + Label + " awake");
 
             while (!_stop.WaitOne(FeedMs))
             {
@@ -2910,14 +3115,102 @@ static class Silence
         try { Marshal.FinalReleaseComObject(o); } catch { }
     }
 
-    static void Fail(string why)
+    void Fail(string why)
     {
         _error = why;
         _state = State.Failed;
-        Program.Log("silent stream failed: " + why);
+        Program.Log(Label + ": " + why);
     }
 
-    static string Hex(int hr) { return "0x" + hr.ToString("X8"); }
+    /// <summary>
+    /// The HRESULT, and what it means when there is a plain way to say it.
+    ///
+    /// The code is always printed. A speaker dropping its Bluetooth link and a driver
+    /// refusing the stream both end a stream, look identical in a log that says only
+    /// "failed", and want completely different things done about them.
+    /// </summary>
+    static string Hex(int hr)
+    {
+        string code = "0x" + hr.ToString("X8");
+        switch (unchecked((uint)hr))
+        {
+            case 0x88890004: return code + " (the speaker disconnected)";
+            case 0x88890001: return code + " (the output is in use exclusively)";
+            case 0x88890008: return code + " (the output refused the format)";
+            case 0x8889000A: return code + " (the audio service is not running)";
+            case 0x80070005: return code + " (access denied)";
+            case 0x80004001: return code + " (not implemented by the driver)";
+            default: return code;
+        }
+    }
+}
+
+/// <summary>
+/// Holds one silent stream per speaker the user wants kept awake.
+///
+/// One stream per speaker rather than one for "the current output", because a speaker
+/// that is connected but not selected still goes to sleep, and then switching to it has
+/// exactly the delay this app exists to remove. Every enabled, connected speaker is held,
+/// so switching between them is instant in both directions.
+/// </summary>
+static class Keeper
+{
+    static readonly Dictionary<string, Silence> _held =
+        new Dictionary<string, Silence>(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Speakers currently being held awake, by endpoint id.</summary>
+    public static ICollection<string> Endpoints { get { return _held.Keys; } }
+
+    public static int Count { get { return _held.Count; } }
+
+    public static bool Holding(string endpointId)
+    {
+        Silence s;
+        return endpointId != null && _held.TryGetValue(endpointId, out s) && s.Active;
+    }
+
+    /// <summary>
+    /// Brings the set of live streams in line with the set of speakers that should be
+    /// held. Called on every tick, so it is also what restarts a stream that died.
+    /// </summary>
+    public static void Apply(Dictionary<string, string> wanted)
+    {
+        foreach (var id in new List<string>(_held.Keys))
+        {
+            if (wanted.ContainsKey(id)) continue;
+            var s = _held[id];
+            _held.Remove(id);
+            Program.Log("letting " + s.Label + " sleep");
+            s.Stop();
+        }
+
+        foreach (var kv in wanted)
+        {
+            Silence s;
+            if (!_held.TryGetValue(kv.Key, out s))
+            {
+                _held[kv.Key] = s = new Silence(kv.Key, kv.Value);
+                s.Start();
+                continue;
+            }
+
+            s.Label = kv.Value;
+            if (s.Active) continue;
+
+            // Read this before Start(), which clears it. A speaker that dropped its
+            // Bluetooth link and came straight back lands here, and the reason it went
+            // is the one line worth having.
+            string died = s.LastError;
+            if (died != null) Program.Log("retrying " + s.Label + " after " + died);
+            s.Start();
+        }
+    }
+
+    public static void StopAll()
+    {
+        foreach (var s in _held.Values) s.Stop();
+        _held.Clear();
+    }
 }
 
 static class Program
@@ -3021,36 +3314,30 @@ static class Program
     }
 
     /// <summary>
-    /// Decides whether the current output should be held awake.
+    /// Decides whether one output should be held awake.
     ///
-    /// Two gates: it must be a Bluetooth device at all (keeping a monitor or a USB
-    /// speaker awake achieves nothing, and holding earbuds awake actively wastes their
-    /// battery), and it must not have been switched off for that particular speaker.
+    /// Four gates: it must be Bluetooth at all (keeping a monitor or a wired speaker
+    /// awake achieves nothing); it must be the endpoint that plays music rather than the
+    /// speaker's call channel; it must be a speaker rather than earbuds, which are
+    /// supposed to sleep when they are put away; and it must not have been switched off
+    /// for that particular device.
     /// </summary>
-    static bool ShouldKeepAwake(string endpointId, out string reason)
+    static bool ShouldKeepAwake(DeviceProps.AudioDevice d, DeviceProps.Snapshot snap, out string reason)
     {
-        if (string.IsNullOrEmpty(endpointId)) { reason = "no default output"; return false; }
+        if (!d.IsBluetooth) { reason = "not a Bluetooth output"; return false; }
 
-        Guid container;
-        if (!DeviceProps.TryContainer(endpointId, out container) || container == Guid.Empty)
+        var bt = snap.Of(d.Container);
+        if (bt == null) { reason = "output device not identifiable"; return false; }
+
+        if (!d.IsA2dp) { reason = "this is the call channel, not the speaker"; return false; }
+
+        DevicePolicy.Remember(d.Container, snap.NameOf(d), bt.ClassOfDevice);
+
+        if (!DevicePolicy.IsEnabled(d.Container, bt.IsSpeaker))
         {
-            reason = "output device not identifiable";
-            return false;
-        }
-
-        if (!DeviceProps.BluetoothContainers().Contains(container))
-        {
-            reason = "not a Bluetooth output";
-            return false;
-        }
-
-        string btName;
-        DeviceProps.BluetoothDevices().TryGetValue(container, out btName);
-        DevicePolicy.Remember(container, btName ?? DeviceProps.EndpointName(endpointId));
-
-        if (!DevicePolicy.IsEnabled(container))
-        {
-            reason = "turned off for this speaker";
+            reason = bt.IsSpeaker
+                ? "turned off for this speaker"
+                : "earbuds are left to sleep";
             return false;
         }
 
@@ -3058,35 +3345,34 @@ static class Program
         return true;
     }
 
-    /// <summary>Starts, sustains or stops the silent stream to match the policy.</summary>
-    static void ApplyPolicy(bool deviceChanged)
+    /// <summary>
+    /// Brings the held speakers in line with the policy.
+    ///
+    /// Every connected speaker the user has left switched on is held, not just whichever
+    /// one Windows is currently playing through: the other one going to sleep is exactly
+    /// the delay this app exists to remove, and it shows up the moment you switch to it.
+    /// </summary>
+    static void ApplyPolicy()
     {
-        string reason;
-        bool keep = ShouldKeepAwake(_lastDevice, out reason);
+        var snap = DeviceProps.Read();
+        var wanted = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        string defaultReason = "no default output";
 
-        if (!keep)
+        foreach (var d in snap.Outputs)
         {
-            if (Silence.Active)
-            {
-                Log("stopping - " + reason);
-                Silence.Stop();
-            }
-            else if (_idleReason != reason)
-            {
-                Log("idle - " + reason);
-            }
-            _idleReason = reason;
-            return;
+            string reason;
+            if (ShouldKeepAwake(d, snap, out reason)) wanted[d.EndpointId] = snap.NameOf(d);
+            if (d.EndpointId == _lastDevice) defaultReason = reason;
         }
 
-        _idleReason = null;
-        if (Silence.Active && !deviceChanged) return;
+        Keeper.Apply(wanted);
 
-        // Read this before Start(), which clears it: a dropped Bluetooth link shows up
-        // here as the reason the stream died, and that is the one line worth logging.
-        string died = Silence.LastError;
-        if (died != null && !deviceChanged) Log("stream lost (" + died + ") - restarting");
-        Silence.Start();
+        // What the tray says about the output you are actually listening through. The
+        // other speakers being held are in the log and in Settings; the panel is about
+        // the one in front of you.
+        string idle = Keeper.Holding(_lastDevice) ? null : defaultReason;
+        if (idle != null && idle != _idleReason) Log("idle - " + idle);
+        _idleReason = idle;
     }
 
     static string IcoPath { get { return Path.Combine(Dir, "SpeakerKeeper.ico"); } }
@@ -3148,7 +3434,7 @@ static class Program
         {
             // Act on the switch immediately; waiting for the next tick makes a toggle
             // that takes five seconds to do anything look broken.
-            ApplyPolicy(false);
+            ApplyPolicy();
             RefreshUi();
             if (_settings != null && !_settings.IsDisposed) _settings.ReloadFromSettings();
         };
@@ -3274,7 +3560,7 @@ static class Program
         _settings = new SettingsForm(WindowIcon(), LogFile, Dir);
         _settings.SettingsChanged += (s, e) =>
         {
-            ApplyPolicy(false);
+            ApplyPolicy();
             RefreshUi();
         };
         _settings.Show();
@@ -3283,7 +3569,7 @@ static class Program
     static void QuitApp()
     {
         Log("quit requested from tray");
-        Silence.Stop();
+        Keeper.StopAll();
         if (_flyout != null) _flyout.Dismiss();
         _tray.Visible = false;
         Application.Exit();
@@ -3296,22 +3582,20 @@ static class Program
         try
         {
             string id = DefaultDeviceId();
-            string name = string.IsNullOrEmpty(id) ? null : DeviceProps.EndpointName(id);
-            s.Name = string.IsNullOrEmpty(name) ? "No output" : name;
+            var snap = DeviceProps.Read();
 
-            Guid container;
-            if (!string.IsNullOrEmpty(id) && DeviceProps.TryContainer(id, out container)
-                && container != Guid.Empty
-                && DeviceProps.BluetoothContainers().Contains(container))
+            DeviceProps.AudioDevice self = null;
+            foreach (var d in snap.Outputs)
+                if (d.EndpointId == id) { self = d; break; }
+
+            s.Name = self != null ? snap.NameOf(self) : "No output";
+
+            if (self != null && self.IsBluetooth)
             {
                 s.Bluetooth = true;
-                s.Container = container;
-
-                // Show the speaker's own name rather than the endpoint's: one speaker
-                // exposes both "Speakers (X)" and "Headset Earphone (X Hands-Free)".
-                string bt;
-                if (DeviceProps.BluetoothDevices().TryGetValue(container, out bt)
-                    && !string.IsNullOrEmpty(bt)) s.Name = bt;
+                s.Container = self.Container;
+                var bt = snap.Of(self.Container);
+                s.IsSpeaker = bt == null || bt.IsSpeaker;
             }
 
             s.Battery = string.IsNullOrEmpty(id) ? -1 : DeviceProps.BatteryPercent(id);
@@ -3319,7 +3603,10 @@ static class Program
             // labelled as such rather than claimed to be unplugged.
             s.Charge = _charge == Charge.Charging ? "on charger"
                      : _charge == Charge.Draining ? "draining" : "";
-            s.KeepingAwake = Silence.Active;
+            s.KeepingAwake = Keeper.Holding(id);
+            // Speakers held awake that are not the one you are listening through. The
+            // panel names the current output, so this is how the others get a mention.
+            s.AlsoHeld = Keeper.Count - (s.KeepingAwake ? 1 : 0);
             s.IdleReason = _idleReason;
         }
         catch { }
@@ -3484,7 +3771,7 @@ static class Program
                     resume.Dispose();
                     Log("post-resume check - output is " + CurrentOutputName());
                     _lastDevice = DefaultDeviceId();
-                    ApplyPolicy(true);
+                    ApplyPolicy();
                     RefreshUi();
                 };
                 resume.Start();
@@ -3494,7 +3781,7 @@ static class Program
         Microsoft.Win32.SystemEvents.SessionEnding += (s, e) =>
             Log("session ending: " + e.Reason);
         _lastDevice = DefaultDeviceId();
-        ApplyPolicy(true);
+        ApplyPolicy();
         BuildTray();
 
         var t = new System.Windows.Forms.Timer();
@@ -3517,12 +3804,12 @@ static class Program
                 // to work out why the speaker went to sleep.
                 Log("default output changed -> " + CurrentOutputName());
                 _lastDevice = dev;
-                ApplyPolicy(true);
+                ApplyPolicy();
                 RefreshUi();   // keep the tooltip pointing at the new device
             }
             else
             {
-                ApplyPolicy(false);
+                ApplyPolicy();
             }
 
             // Battery moves slowly and each read walks the device tree, so poll it
@@ -3531,9 +3818,9 @@ static class Program
                 CheckBattery();
 
             if (_ticks % 120 == 0)
-                Log("heartbeat " + (Silence.Active
-                        ? "stream running"
-                        : "idle - " + (_idleReason ?? Silence.LastError ?? "stopped")));
+                Log("heartbeat " + (Keeper.Count > 0
+                        ? "keeping " + Keeper.Count + " awake"
+                        : "idle - " + (_idleReason ?? "stopped")));
         }
         catch (Exception ex) { Log("tick error: " + ex.Message); }
     }

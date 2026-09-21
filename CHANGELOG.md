@@ -21,6 +21,34 @@ Added / Changed / Fixed / Removed / Security
 
 Nothing yet.
 
+## [1.4.0] - 2026-09-21
+
+### Added
+
+- **Every speaker you own is kept awake, not just the one you are listening to.** Until
+  now only the current output was held, so the other speaker in the room went to sleep
+  and switching to it brought back exactly the delay this app exists to remove. Each
+  connected speaker you have switched on is now held awake at the same time, so moving
+  between them is instant in both directions.
+- **Speakers you have paired but never connected are listed in Settings**, so a second
+  speaker can be switched on before the first time you use it rather than after.
+
+### Fixed
+
+- **Earbuds and headsets really are left alone now.** The app said it only worked on
+  speakers, and then held a silent stream open on any Bluetooth output that became the
+  default, headphones included, which flattens them in a bag. It now asks the device what
+  it is: speakers are kept awake, earbuds and headsets are left to sleep, and the switch
+  in Settings still overrides it for a speaker that reports itself wrongly.
+- **A speaker's call channel is never held awake.** One Bluetooth speaker publishes two
+  outputs: the stereo one you listen through and a mono hands-free one for calls. Only
+  the first is held now, so nothing the app does can put a speaker into call mode.
+- **The log says what actually happened.** A Bluetooth output being torn down underneath
+  a running stream was recorded as a bare `silent stream failed: Not implemented`, with
+  no error code and no way to tell a speaker disconnecting apart from a driver refusing
+  the stream. Lines now name the speaker and carry the real code, with the common ones
+  spelled out, so `the speaker disconnected` reads as what it is.
+
 ## [1.3.2] - 2026-09-20
 
 ### Changed
@@ -157,7 +185,8 @@ First public release.
 - Follows the default output device when you switch speakers.
 - Per-speaker on/off, a live log viewer, start-with-Windows, and opt-in auto-updates.
 
-[Unreleased]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.3.2...HEAD
+[Unreleased]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.3.2...v1.4.0
 [1.3.2]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.2.1...v1.3.0
