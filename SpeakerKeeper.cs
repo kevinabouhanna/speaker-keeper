@@ -247,6 +247,10 @@ static class DeviceProps
         public string Name;
         public uint ClassOfDevice;
 
+        /// <summary>The radio address, as it appears in the device id. Used to tell two
+        /// of the same model apart, since they arrive with the same name.</summary>
+        public string Address;
+
         /// <summary>A headset, a speaker, anything whose job is sound. Not a mouse.</summary>
         public bool IsAudio { get { return ((ClassOfDevice >> 8) & 0x1F) == 4; } }
 
@@ -340,6 +344,34 @@ static class DeviceProps
         return "SWD" + (char)92 + "MMDEVAPI" + (char)92 + endpointId;
     }
 
+    /// <summary>
+    /// Makes two of the same model tell themselves apart.
+    ///
+    /// A stereo pair is two identical speakers, so both arrive calling themselves the same
+    /// thing, and a settings page with two rows reading "Xiaomi Sound Pocket" and a switch
+    /// each is useless: there is no way to know which switch is which speaker. The last
+    /// four digits of the radio address are printed after the name, and only when there is
+    /// a clash, so the ordinary case stays clean.
+    /// </summary>
+    static void Disambiguate(Dictionary<Guid, BluetoothDevice> devices)
+    {
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var d in devices.Values)
+        {
+            if (string.IsNullOrEmpty(d.Name)) continue;
+            int n;
+            counts[d.Name] = counts.TryGetValue(d.Name, out n) ? n + 1 : 1;
+        }
+
+        foreach (var d in devices.Values)
+        {
+            int n;
+            if (string.IsNullOrEmpty(d.Name) || !counts.TryGetValue(d.Name, out n) || n < 2) continue;
+            if (string.IsNullOrEmpty(d.Address) || d.Address.Length < 4) continue;
+            d.Name += " (" + d.Address.Substring(d.Address.Length - 4) + ")";
+        }
+    }
+
     static string StringProperty(string instanceId, DEVPROPKEY key)
     {
         var raw = GetProperty(instanceId, key);
@@ -392,8 +424,20 @@ static class DeviceProps
                     if (v != 0 && (isRoot || dev.ClassOfDevice == 0)) dev.ClassOfDevice = v;
                 }
 
+                if (isRoot && string.IsNullOrEmpty(dev.Address))
+                {
+                    int at = id.IndexOf((char)92 + "DEV_", StringComparison.OrdinalIgnoreCase);
+                    if (at >= 0)
+                    {
+                        int end = id.IndexOf((char)92, at + 5);
+                        dev.Address = end < 0 ? id.Substring(at + 5) : id.Substring(at + 5, end - at - 5);
+                    }
+                }
+
                 if (isRoot) fromRoot.Add(container);
             }
+
+        Disambiguate(snap.Bluetooth);
 
         foreach (var id in DeviceIds("SWD"))
         {

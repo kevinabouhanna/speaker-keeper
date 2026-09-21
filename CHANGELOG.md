@@ -19,7 +19,13 @@ Added / Changed / Fixed / Removed / Security
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **Two speakers of the same model can be told apart.** A stereo pair is two identical
+  speakers, so both announce the same name, and Settings showed two identical rows with a
+  switch each and no way to know which was which. The last four digits of the Bluetooth
+  address now follow the name, and only when there is a clash, so a single speaker still
+  reads as itself.
 
 ## [1.5.0] - 2026-09-21
 
