@@ -218,9 +218,38 @@ Each entry is there because it narrows that down.
 | `heartbeat state=Playing` | Every 10 min; proves the app was alive and healthy between events |
 | `tick error` / `menu refresh failed` / `battery check failed` | Unexpected failures, with the exception message |
 | `quit requested from tray` | The user stopped it deliberately |
+| `stream lost …, held for 14m55s` / `letting X sleep - <reason>, held for …` | How long a speaker was held when it went. The same number of minutes every time is the speaker's own timer |
 
-The log rotates at 1 MB to `SpeakerKeeper.log.old`, so it can't grow without bound on a
-machine that's always on.
+### What the speaker was doing: `Activity`
+
+Everything above is what the app did. `Activity` records what everything *else* was
+doing, because that is what explains a drop. It samples every output and microphone once
+a second on its own MTA thread (`IAudioSessionManager2` for who is playing or recording,
+each session's `IAudioMeterInformation` peak for how loud, `IAudioEndpointVolume`,
+`GetMixFormat`, and the default device for each role). It only reads; it changes nothing.
+
+| Entry | Why it matters |
+|---|---|
+| `connected: NAME, 44100 Hz stereo, volume 50%` / `present:` at startup | A Bluetooth output or microphone arriving, and its state |
+| `APP playing to NAME (from HH:MM:SS)` / `APP stopped playing to NAME` | Which app plays where. Held back until the state has lasted 10s, so pausing a video is not a log line |
+| `APP opened the microphone NAME - that speaker is in call mode …` / `closed` | A Bluetooth speaker's microphone opening moves it to its hands-free profile. The most likely explanation for a speaker switching off mid-game |
+| `default output for calls` / `default microphone` / `default microphone for calls -> NAME` | The three roles the tray's own line does not cover. The calls microphone is what voice chat opens |
+| `NAME: format 44100 Hz stereo -> 16000 Hz mono` | The speaker changing profile |
+| `volume NAME: 50% -> 0%` | Bluetooth outputs only, once the slider stops moving |
+| `activity NAME, last 5 min: …` | Every 5 minutes per Bluetooth output: seconds of sound, loudest level, from which apps, music or call mode |
+| `display off` / `display on` / `display dimmed` | `DisplayWatch`: `RegisterPowerSettingNotification` for `GUID_CONSOLE_DISPLAY_STATE` on a hidden window. The screen sleeping also takes the monitor's HDMI audio output away |
+| `PC locked` / `PC unlocked` | A locked PC turns its display off after one minute, not the usual timeout |
+| `disconnected: NAME after …; last sound …; in call mode since …; … auto-off, not a lost connection` | Written at the moment a Bluetooth output goes: how long it was connected, when it last heard anything and from whom, whether its microphone was open, and whether the gap is a round number of minutes |
+
+Our own stream is excluded throughout: it is silent by design, and "Speaker Keeper was
+playing" answers nothing. Sound below -70 dB counts as silence. `Health.Advice` reads the
+last `disconnected:` for a speaker to decide what to tell the user; see
+`docs/INVESTIGATION-auto-off.md` for how all of this was worked out.
+
+The log rotates at 4 MB and keeps three previous files, `SpeakerKeeper.log.1` (newest)
+to `.3`, so it can't grow past 16 MB on a machine that's always on but still reaches back
+days. The single `SpeakerKeeper.log.old` of earlier versions is kept as the oldest file
+on the first rotation.
 
 ## Low-battery notification
 
@@ -473,6 +502,58 @@ touched, so a failed update leaves a working install:
 > hashes, which means whoever controls the update URL controls what runs as SYSTEM on
 > every install. Treat that host as production infrastructure. Authenticode signing is
 > the next step up if this gets real distribution.
+
+## Turning off speaker microphones
+
+**Settings → Speakers → Turn off speaker microphones**, off by default.
+
+Most Bluetooth speakers also have a microphone, through their Hands-Free profile. An app
+opening it moves the speaker into call mode: 16 kHz mono, call-quality sound, and on
+some speakers a different idea of when to switch themselves off (see
+[INVESTIGATION-auto-off.md](INVESTIGATION-auto-off.md), F2). Windows makes that
+microphone its **Default Communication Device** whenever the speaker connects, which is
+the one Teams, Discord and game voice chat open. Settings does not show it, only the old
+Sound control panel, so a user can check their default microphone, see their webcam, and
+be right, while every call goes through the speaker.
+
+Changing that role by hand does not stick: it comes back on every reconnect. Switching
+the speaker's **Hands-Free AG** node off (`BTHENUM\{0000111E-…}`) does, until the speaker
+is re-paired, which creates a new node. So the setting is enforced, the way the updater
+is:
+
+| | |
+|---|---|
+| Switch | `--speaker-microphones off\|on`, run elevated by Settings (one UAC prompt) |
+| Flag | `HKLM\Software\SpeakerKeeper\SpeakerMicrophonesOff` = 1, readable unelevated |
+| Record | `HKLM\Software\SpeakerKeeper\MicrophonesTurnedOff`, the nodes this app disabled |
+| Task | `Speaker Keeper Microphones`, `SYSTEM`, at startup and on `Microsoft-Windows-Kernel-PnP/Configuration` event 400 |
+| Runs | `SpeakerKeeper.exe --enforce-speaker-microphones`, which watches for 30 s |
+| Log | `%ProgramData%\Speaker Keeper\microphones.log`, plus the user's own log when changed from Settings |
+
+- **Event 400 is "device configured".** Windows writes it for every node a pairing
+  creates, the Hands-Free one included, so a re-pair is caught within seconds with nobody
+  doing anything. The task watches for 30 seconds because it fires on the first node of
+  a pairing, and the Hands-Free one is not always first. `IgnoreNew` drops the rest of
+  the burst rather than queueing a run per node.
+- **Disabling is SetupAPI's `DIF_PROPERTYCHANGE` with `DICS_DISABLE` and global scope**,
+  which is what Device Manager and `Disable-PnpDevice` do. It persists across reboots.
+- **Only loudspeakers.** `BluetoothDevice.IsLoudspeaker` accepts Class of Device minor
+  classes 5 (loudspeaker), 7 (portable audio), 10 (hi-fi) and 15 (TV with speakers), and
+  nothing that reports no class. It is stricter than `IsSpeaker` on purpose: keeping a
+  device awake by mistake costs battery, but taking a microphone by mistake breaks a
+  headset, a car kit or a conference speakerphone.
+- **Only what it took is given back.** Turning the setting off re-enables exactly the
+  nodes in `MicrophonesTurnedOff`, never one the user disabled by hand. Uninstalling does
+  the same, removes the task, and runs before the HKLM key it reads is deleted.
+- **The task only ever points into Program Files.** A SYSTEM task runs whatever is at its
+  path, so pointing one at a user-writable folder would hand out SYSTEM to anyone able to
+  replace a file. A copy run from elsewhere applies the setting once and says it cannot
+  keep it applied (`NotKeptOff`, exit 4).
+- Setup re-creates the task when it installs over a copy that had the setting on, since
+  the install folder may have moved.
+
+`tools/speaker-output-only.ps1` does the one-off version by hand, for a copy that is not
+installed.
 
 ## Autostart
 

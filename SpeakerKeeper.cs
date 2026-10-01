@@ -22,8 +22,8 @@ using System.Windows.Forms;
 [assembly: AssemblyDescription("Keeps a Bluetooth speaker awake with a silent audio stream")]
 [assembly: AssemblyCompany("Kevin Abou Hanna")]
 [assembly: AssemblyCopyright("Copyright (c) Kevin Abou Hanna")]
-[assembly: AssemblyVersion("1.5.1.0")]
-[assembly: AssemblyFileVersion("1.5.1.0")]
+[assembly: AssemblyVersion("1.6.0.0")]
+[assembly: AssemblyFileVersion("1.6.0.0")]
 
 [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
 class MMDeviceEnumeratorClass { }
@@ -100,6 +100,108 @@ interface IAudioRenderClient
     int GetBuffer(uint frames, out IntPtr data);
     [PreserveSig]
     int ReleaseBuffer(uint frames, int flags);
+}
+
+// What every output and microphone is doing, for the log. See Activity. The enumerator
+// above hands its collection back as a raw pointer, which is wrapped as this one.
+[ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IMMDeviceCollection
+{
+    [PreserveSig]
+    int GetCount(out uint count);
+    [PreserveSig]
+    int Item(uint index, out IMMDevice device);
+}
+
+[ComImport, Guid("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IAudioSessionManager2
+{
+    [PreserveSig]
+    int GetAudioSessionControl(IntPtr guid, int flags, out IntPtr control);
+    [PreserveSig]
+    int GetSimpleAudioVolume(IntPtr guid, int flags, out IntPtr volume);
+    [PreserveSig]
+    int GetSessionEnumerator(out IAudioSessionEnumerator sessions);
+}
+
+[ComImport, Guid("E2F5BB11-0570-40CA-ACDD-3AA01277DEE8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IAudioSessionEnumerator
+{
+    [PreserveSig]
+    int GetCount(out int count);
+    [PreserveSig]
+    int GetSession(int index, out IAudioSessionControl2 session);
+}
+
+// IAudioSessionControl's methods first, in order: this is a vtable, not a list of
+// the calls that happen to be used.
+[ComImport, Guid("bfb7ff88-7239-4fc9-8fa2-07c950be9c6d"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IAudioSessionControl2
+{
+    [PreserveSig]
+    int GetState(out int state);
+    [PreserveSig]
+    int GetDisplayName(out IntPtr name);
+    [PreserveSig]
+    int SetDisplayName(IntPtr name, IntPtr context);
+    [PreserveSig]
+    int GetIconPath(out IntPtr path);
+    [PreserveSig]
+    int SetIconPath(IntPtr path, IntPtr context);
+    [PreserveSig]
+    int GetGroupingParam(out Guid grouping);
+    [PreserveSig]
+    int SetGroupingParam(IntPtr grouping, IntPtr context);
+    [PreserveSig]
+    int RegisterAudioSessionNotification(IntPtr events);
+    [PreserveSig]
+    int UnregisterAudioSessionNotification(IntPtr events);
+    [PreserveSig]
+    int GetSessionIdentifier(out IntPtr id);
+    [PreserveSig]
+    int GetSessionInstanceIdentifier(out IntPtr id);
+    [PreserveSig]
+    int GetProcessId(out uint pid);
+    [PreserveSig]
+    int IsSystemSoundsSession();
+}
+
+[ComImport, Guid("C02216F6-8C67-4B5B-9D00-D008E73E0064"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IAudioMeterInformation
+{
+    [PreserveSig]
+    int GetPeakValue(out float peak);
+}
+
+[ComImport, Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IAudioEndpointVolume
+{
+    [PreserveSig]
+    int RegisterControlChangeNotify(IntPtr notify);
+    [PreserveSig]
+    int UnregisterControlChangeNotify(IntPtr notify);
+    [PreserveSig]
+    int GetChannelCount(out int count);
+    [PreserveSig]
+    int SetMasterVolumeLevel(float db, IntPtr context);
+    [PreserveSig]
+    int SetMasterVolumeLevelScalar(float level, IntPtr context);
+    [PreserveSig]
+    int GetMasterVolumeLevel(out float db);
+    [PreserveSig]
+    int GetMasterVolumeLevelScalar(out float level);
+    [PreserveSig]
+    int SetChannelVolumeLevel(uint channel, float db, IntPtr context);
+    [PreserveSig]
+    int SetChannelVolumeLevelScalar(uint channel, float level, IntPtr context);
+    [PreserveSig]
+    int GetChannelVolumeLevel(uint channel, out float db);
+    [PreserveSig]
+    int GetChannelVolumeLevelScalar(uint channel, out float level);
+    [PreserveSig]
+    int SetMute(bool mute, IntPtr context);
+    [PreserveSig]
+    int GetMute(out bool mute);
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -199,6 +301,53 @@ static class DeviceProps
         return System.Text.Encoding.Unicode.GetString(raw).TrimEnd('\0');
     }
 
+    /// <summary>
+    /// Whether an endpoint, output or microphone, belongs to a Bluetooth device.
+    ///
+    /// One property read rather than a full Read(), because Activity asks it of every
+    /// endpoint that appears, microphones included, and Read() only knows outputs. The
+    /// devnode behind a Bluetooth endpoint is always on one of the BTH* enumerators:
+    /// BTHENUM for music, BTHHFENUM for the hands-free channel and its microphone.
+    /// </summary>
+    public static bool IsBluetoothEndpoint(string endpointId)
+    {
+        var parent = StringProperty(EndpointInstanceId(endpointId), Parent);
+        return parent != null && parent.StartsWith("BTH", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Every paired device's Hands-Free node: the part of a Bluetooth audio device that
+    /// gives it a microphone and call mode. {0000111E} is the Hands-Free service.
+    /// Disabled ones are included; they are still present, only switched off.
+    /// </summary>
+    public static List<string> HandsFreeNodes()
+    {
+        var list = new List<string>();
+        foreach (var id in DeviceIds("BTHENUM"))
+        {
+            if (!id.StartsWith("BTHENUM" + (char)92 + "{0000111E", StringComparison.OrdinalIgnoreCase)) continue;
+            if (GetProperty(id, ContainerId) == null) continue;   // not present: unpaired
+            list.Add(id);
+        }
+        return list;
+    }
+
+    /// <summary>The device's CM_PROB_* code, 0 when it is working. 22 is disabled.</summary>
+    public static uint ProblemOf(string instanceId)
+    {
+        var p = GetProperty(instanceId, ProblemCode);
+        return p != null && p.Length >= 4 ? BitConverter.ToUInt32(p, 0) : 0;
+    }
+
+    public static bool ContainerOf(string instanceId, out Guid container)
+    {
+        container = Guid.Empty;
+        var raw = GetProperty(instanceId, ContainerId);
+        if (raw == null || raw.Length < 16) return false;
+        container = new Guid(raw);
+        return true;
+    }
+
     /// <summary>One selectable audio output, as shown in the Settings device list.</summary>
     public class AudioDevice
     {
@@ -239,6 +388,9 @@ static class DeviceProps
     {
         public string Name;
         public uint Problem;    // CM_PROB_*, 0 when the device is working
+
+        /// <summary>CM_PROB_DISABLED: switched off by hand, not broken.</summary>
+        public bool Disabled { get { return Problem == 22; } }
     }
 
     /// <summary>A paired Bluetooth device, and what it says it is.</summary>
@@ -253,6 +405,29 @@ static class DeviceProps
 
         /// <summary>A headset, a speaker, anything whose job is sound. Not a mouse.</summary>
         public bool IsAudio { get { return ((ClassOfDevice >> 8) & 0x1F) == 4; } }
+
+        /// <summary>
+        /// Says outright that it is a loudspeaker. Stricter than IsSpeaker, on purpose.
+        ///
+        /// IsSpeaker decides what to keep awake, where guessing "speaker" for a device
+        /// that says nothing is the safe mistake. This decides whose microphone to take
+        /// away, where the safe mistake is the other one: a headset, a car kit or a
+        /// conference speakerphone exists to be talked into. So only a device that names
+        /// itself a loudspeaker (5), portable audio (7), hi-fi (10) or a TV with speakers
+        /// (15) qualifies, and nothing that reports no class at all.
+        /// </summary>
+        public bool IsLoudspeaker
+        {
+            get
+            {
+                if (!IsAudio) return false;
+                switch ((ClassOfDevice >> 2) & 0x3F)
+                {
+                    case 5: case 7: case 10: case 15: return true;
+                    default: return false;
+                }
+            }
+        }
 
         /// <summary>
         /// Whether this is something worth holding awake.
@@ -811,6 +986,16 @@ static class Installer
         }
         catch { }
 
+        // Same for the microphone task, and give back every speaker microphone it took.
+        // Uninstalling has to leave the speakers as the app found them; this must run
+        // before the HKLM key goes, because that key is the list of what to give back.
+        try
+        {
+            Microphones.RemoveTask();
+            Microphones.RestoreAll();
+        }
+        catch { }
+
         TryDelete(RunKey, "Speaker Keeper");
         TryDeleteTree(SettingsKey);
         TryDeleteMachineTree(SettingsKey);          // HKLM: UpdateUrl / AutoUpdate
@@ -1010,7 +1195,7 @@ static class Updater
         catch { return 1; }
     }
 
-    static int Run(string exe, string args)
+    internal static int Run(string exe, string args)
     {
         var psi = new System.Diagnostics.ProcessStartInfo(exe, args);
         psi.UseShellExecute = false;
@@ -1024,6 +1209,371 @@ static class Updater
             p.WaitForExit(30000);
             return p.ExitCode;
         }
+    }
+}
+
+/// <summary>
+/// Optionally takes the microphone away from Bluetooth speakers. Off unless asked for.
+///
+/// Most Bluetooth speakers have a microphone too, through their Hands-Free profile, and
+/// an app opening it moves the speaker into call mode: mono, call quality, and on some
+/// speakers a different idea of when to switch themselves off. Windows also makes that
+/// microphone its Default Communication Device whenever the speaker connects. That is
+/// the one Teams, Discord and game voice chat open, and Settings does not show it, so a
+/// user can check their default microphone, see their webcam, and be right, while every
+/// call goes through the speaker. See docs/INVESTIGATION-auto-off.md, F2.
+///
+/// Switching the Hands-Free profile off is the only fix that sticks. The role comes back
+/// on every reconnect and the profile on every re-pair, so this is a SYSTEM task, like
+/// the updater, that runs whenever Windows sets up a device and at startup, and switches
+/// the profile off again. Only loudspeakers lose it: earbuds, headsets, car kits and
+/// conference speakerphones exist to be talked into and are never touched.
+///
+/// Off by default, because other people's speakers are other people's business.
+/// </summary>
+static class Microphones
+{
+    public const string TaskName = "Speaker Keeper Microphones";
+    const string FlagValue = "SpeakerMicrophonesOff";
+
+    // The nodes this app switched off, by instance id. Turning the setting off restores
+    // exactly these, and never a device the user disabled by hand for their own reasons.
+    const string TurnedOffKey = Settings.MachineKey + "\\" + "MicrophonesTurnedOff";
+
+    // Exit codes for --speaker-microphones, read by Settings.
+    public const int Done = 0, Failed = 1, NotKeptOff = 4, Refused = -1;
+
+    /// <summary>Whether speaker microphones should be off. Readable without elevation.</summary>
+    public static bool Enabled
+    {
+        get
+        {
+            try
+            {
+                using (var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(Settings.MachineKey))
+                    return k != null && Convert.ToInt32(k.GetValue(FlagValue, 0)) == 1;
+            }
+            catch { return false; }
+        }
+    }
+
+    /// <summary>
+    /// Re-launches this exe elevated to make the change, the same way the auto-update
+    /// switch does. Returns its exit code, or Refused if the prompt was dismissed.
+    /// </summary>
+    public static int SetElevated(bool off)
+    {
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo();
+            psi.FileName = Application.ExecutablePath;
+            psi.Arguments = "--speaker-microphones " + (off ? "off" : "on");
+            psi.UseShellExecute = true;
+            psi.Verb = "runas";
+            psi.WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden;
+
+            var p = System.Diagnostics.Process.Start(psi);
+            if (p == null) return Refused;
+            p.WaitForExit(90000);
+            return p.ExitCode;
+        }
+        catch { return Refused; }
+    }
+
+    /// <summary>Runs elevated, from --speaker-microphones.</summary>
+    public static int Apply(bool off)
+    {
+        return Apply(off, Path.GetDirectoryName(Application.ExecutablePath));
+    }
+
+    /// <summary>
+    /// Records the choice, applies it now, and creates or removes the task that keeps it
+    /// applied. Told where the install lives for the same reason Updater.Apply is: Setup
+    /// runs from wherever Install.exe was saved.
+    /// </summary>
+    public static int Apply(bool off, string installDir)
+    {
+        try
+        {
+            using (var k = Microsoft.Win32.Registry.LocalMachine.CreateSubKey(Settings.MachineKey))
+                if (k != null) k.SetValue(FlagValue, off ? 1 : 0, Microsoft.Win32.RegistryValueKind.DWord);
+
+            if (!off)
+            {
+                RemoveTask();
+                Restore();
+                Note("speaker microphones are back on");
+                return Done;
+            }
+
+            Note("speaker microphones set to off");
+            Enforce(TimeSpan.Zero);
+            return CreateTask(installDir) ? Done : NotKeptOff;
+        }
+        catch (Exception ex) { Note("could not change speaker microphones: " + ex.Message); return Failed; }
+    }
+
+    /// <summary>Runs as SYSTEM, from the task.</summary>
+    public static int EnforceFromTask()
+    {
+        if (!Enabled) return Done;
+        // The task fires on the first device Windows sets up during a pairing, and the
+        // Hands-Free node is not always that one, so watch for half a minute rather than
+        // looking once and missing it.
+        Enforce(TimeSpan.FromSeconds(30));
+        return Done;
+    }
+
+    class Node
+    {
+        public string Id, Name;
+        public bool Disabled, Loudspeaker;
+    }
+
+    static List<Node> Nodes()
+    {
+        var snap = DeviceProps.Read();
+        var list = new List<Node>();
+        foreach (var id in DeviceProps.HandsFreeNodes())
+        {
+            var n = new Node { Id = id, Name = id };
+            n.Disabled = DeviceProps.ProblemOf(id) == 22;
+            Guid c;
+            var bt = DeviceProps.ContainerOf(id, out c) ? snap.Of(c) : null;
+            if (bt != null)
+            {
+                if (!string.IsNullOrEmpty(bt.Name)) n.Name = bt.Name;
+                n.Loudspeaker = bt.IsLoudspeaker;
+            }
+            list.Add(n);
+        }
+        return list;
+    }
+
+    /// <summary>Switches off the Hands-Free node of every paired loudspeaker that still has one.</summary>
+    static void Enforce(TimeSpan watchFor)
+    {
+        var until = DateTime.UtcNow + watchFor;
+        var failed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        while (true)
+        {
+            foreach (var n in Nodes())
+            {
+                if (n.Disabled || !n.Loudspeaker || failed.Contains(n.Id)) continue;
+                int err;
+                if (SetDeviceEnabled(n.Id, false, out err))
+                {
+                    Remember(n);
+                    Note("microphone off on " + n.Name);
+                }
+                else
+                {
+                    failed.Add(n.Id);   // once is enough to say so
+                    Note("could not turn off the microphone on " + n.Name + ": error 0x" + err.ToString("X"));
+                }
+            }
+            if (DateTime.UtcNow >= until) return;
+            Thread.Sleep(3000);
+        }
+    }
+
+    /// <summary>For the uninstaller: everything back as it was, task and setting included.</summary>
+    public static void RestoreAll()
+    {
+        Restore();
+        try
+        {
+            using (var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(Settings.MachineKey, true))
+                if (k != null && k.GetValue(FlagValue) != null) k.DeleteValue(FlagValue);
+        }
+        catch { }
+    }
+
+    /// <summary>Switches back on exactly the nodes this app switched off, then forgets them.</summary>
+    static void Restore()
+    {
+        var ids = new List<string>();
+        try
+        {
+            using (var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(TurnedOffKey))
+                if (k != null) ids.AddRange(k.GetValueNames());
+        }
+        catch { }
+
+        foreach (var id in ids)
+        {
+            int err;
+            // 0xE000020B: no such device. It was unpaired since, and has nothing to restore.
+            if (SetDeviceEnabled(id, true, out err) || err == unchecked((int)0xE000020B))
+                Note("microphone back on: " + id);
+            else
+                Note("could not turn the microphone back on: " + id + ", error 0x" + err.ToString("X"));
+        }
+
+        try { Microsoft.Win32.Registry.LocalMachine.DeleteSubKeyTree(TurnedOffKey, false); } catch { }
+    }
+
+    static void Remember(Node n)
+    {
+        try
+        {
+            using (var k = Microsoft.Win32.Registry.LocalMachine.CreateSubKey(TurnedOffKey))
+                if (k != null) k.SetValue(n.Id, n.Name);
+        }
+        catch { }
+    }
+
+    static bool CreateTask(string installDir)
+    {
+        string exe = Path.GetFullPath(Path.Combine(installDir, "SpeakerKeeper.exe"));
+
+        // A SYSTEM task runs whatever is at this path. Pointing it anywhere a standard
+        // user can write would hand SYSTEM to anyone able to replace one file, so it only
+        // ever points into Program Files, which is admin-only. A copy run from anywhere
+        // else still applies the setting once; it just cannot keep it applied.
+        if (!IsProtected(exe) || !File.Exists(exe))
+        {
+            Note("not keeping microphones off automatically: " + exe + " is not an installed copy");
+            return false;
+        }
+
+        string xml = TaskXml(exe);
+        string tmp = Path.Combine(Path.GetTempPath(), "SpeakerKeeperMicrophones.xml");
+        try
+        {
+            File.WriteAllText(tmp, xml, System.Text.Encoding.Unicode);
+            int rc = Updater.Run("schtasks.exe", "/Create /F /TN \"" + TaskName + "\" /XML \"" + tmp + "\"");
+            if (rc != 0) Note("could not create the task: schtasks exit " + rc);
+            return rc == 0;
+        }
+        finally { try { File.Delete(tmp); } catch { } }
+    }
+
+    public static void RemoveTask()
+    {
+        try { Updater.Run("schtasks.exe", "/Delete /F /TN \"" + TaskName + "\""); } catch { }
+    }
+
+    static bool IsProtected(string path)
+    {
+        foreach (var f in new[] { Environment.SpecialFolder.ProgramFiles, Environment.SpecialFolder.ProgramFilesX86 })
+        {
+            string root = Environment.GetFolderPath(f);
+            if (string.IsNullOrEmpty(root)) continue;
+            if (path.StartsWith(root.TrimEnd((char)92) + (char)92, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// The task, as XML because schtasks' own switches allow one trigger and this needs two.
+    ///
+    /// Kernel-PnP/Configuration event 400 is "device configured", which Windows writes for
+    /// every node a pairing creates, the Hands-Free one included. It is on by default.
+    /// The boot trigger catches anything paired while the task did not exist.
+    /// </summary>
+    static string TaskXml(string exe)
+    {
+        string query = "<QueryList><Query Id=\"0\" Path=\"Microsoft-Windows-Kernel-PnP/Configuration\">"
+                     + "<Select Path=\"Microsoft-Windows-Kernel-PnP/Configuration\">*[System[(EventID=400)]]</Select>"
+                     + "</Query></QueryList>";
+        return "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n"
+             + "<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\r\n"
+             + "  <RegistrationInfo><Description>Keeps Bluetooth speakers from being used as microphones."
+             + " Created by Speaker Keeper when Settings &gt; Speakers &gt; Turn off speaker microphones is on.</Description></RegistrationInfo>\r\n"
+             + "  <Triggers>\r\n"
+             + "    <BootTrigger><Enabled>true</Enabled></BootTrigger>\r\n"
+             + "    <EventTrigger><Enabled>true</Enabled><Subscription>"
+             + System.Security.SecurityElement.Escape(query) + "</Subscription></EventTrigger>\r\n"
+             + "  </Triggers>\r\n"
+             + "  <Principals><Principal id=\"System\"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>\r\n"
+             + "  <Settings>\r\n"
+             // A pairing writes a burst of events. One run watches for 30 seconds, which
+             // covers the burst, so the rest are dropped rather than queued.
+             + "    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\r\n"
+             + "    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\r\n"
+             + "    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\r\n"
+             + "    <ExecutionTimeLimit>PT2M</ExecutionTimeLimit>\r\n"
+             + "    <AllowStartOnDemand>true</AllowStartOnDemand>\r\n"
+             + "    <Enabled>true</Enabled>\r\n"
+             + "  </Settings>\r\n"
+             + "  <Actions Context=\"System\"><Exec><Command>" + System.Security.SecurityElement.Escape(exe)
+             + "</Command><Arguments>--enforce-speaker-microphones</Arguments></Exec></Actions>\r\n"
+             + "</Task>\r\n";
+    }
+
+    // SetupAPI's property-change request: what Device Manager's Disable and Enable do,
+    // and what Disable-PnpDevice calls underneath. Global scope, so it persists.
+    [StructLayout(LayoutKind.Sequential)]
+    struct SP_DEVINFO_DATA { public int cbSize; public Guid ClassGuid; public int DevInst; public IntPtr Reserved; }
+
+    // SP_CLASSINSTALL_HEADER (cbSize, InstallFunction) inlined at the front.
+    [StructLayout(LayoutKind.Sequential)]
+    struct SP_PROPCHANGE_PARAMS { public int cbSize; public int InstallFunction; public int StateChange; public int Scope; public int HwProfile; }
+
+    [DllImport("setupapi.dll", SetLastError = true)]
+    static extern IntPtr SetupDiCreateDeviceInfoList(IntPtr classGuid, IntPtr parent);
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool SetupDiOpenDeviceInfo(IntPtr set, string instanceId, IntPtr parent, int flags, ref SP_DEVINFO_DATA data);
+    [DllImport("setupapi.dll", SetLastError = true)]
+    static extern bool SetupDiSetClassInstallParams(IntPtr set, ref SP_DEVINFO_DATA data, ref SP_PROPCHANGE_PARAMS p, int size);
+    [DllImport("setupapi.dll", SetLastError = true)]
+    static extern bool SetupDiCallClassInstaller(int function, IntPtr set, ref SP_DEVINFO_DATA data);
+    [DllImport("setupapi.dll", SetLastError = true)]
+    static extern bool SetupDiDestroyDeviceInfoList(IntPtr set);
+
+    const int DIF_PROPERTYCHANGE = 0x12, DICS_ENABLE = 1, DICS_DISABLE = 2, DICS_FLAG_GLOBAL = 1;
+
+    static bool SetDeviceEnabled(string instanceId, bool enable, out int error)
+    {
+        error = 0;
+        IntPtr set = SetupDiCreateDeviceInfoList(IntPtr.Zero, IntPtr.Zero);
+        if (set == new IntPtr(-1)) { error = Marshal.GetLastWin32Error(); return false; }
+        try
+        {
+            var data = new SP_DEVINFO_DATA();
+            data.cbSize = Marshal.SizeOf(typeof(SP_DEVINFO_DATA));
+            if (!SetupDiOpenDeviceInfo(set, instanceId, IntPtr.Zero, 0, ref data))
+            { error = Marshal.GetLastWin32Error(); return false; }
+
+            var p = new SP_PROPCHANGE_PARAMS();
+            p.cbSize = 8;
+            p.InstallFunction = DIF_PROPERTYCHANGE;
+            p.StateChange = enable ? DICS_ENABLE : DICS_DISABLE;
+            p.Scope = DICS_FLAG_GLOBAL;
+            if (!SetupDiSetClassInstallParams(set, ref data, ref p, Marshal.SizeOf(typeof(SP_PROPCHANGE_PARAMS))))
+            { error = Marshal.GetLastWin32Error(); return false; }
+
+            if (!SetupDiCallClassInstaller(DIF_PROPERTYCHANGE, set, ref data))
+            { error = Marshal.GetLastWin32Error(); return false; }
+            return true;
+        }
+        finally { SetupDiDestroyDeviceInfoList(set); }
+    }
+
+    /// <summary>
+    /// Writes to %ProgramData%\Speaker Keeper\microphones.log, next to the updater's log,
+    /// because the task runs as SYSTEM and has no user's log to write to. When a user
+    /// made the change from Settings it goes in their log as well.
+    /// </summary>
+    static void Note(string m)
+    {
+        try
+        {
+            if (!System.Security.Principal.WindowsIdentity.GetCurrent().IsSystem)
+                Program.Log("microphones: " + m);
+        }
+        catch { }
+        try
+        {
+            string dir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Speaker Keeper");
+            Directory.CreateDirectory(dir);
+            string f = Path.Combine(dir, "microphones.log");
+            if (File.Exists(f) && new FileInfo(f).Length > 256 * 1024) File.Delete(f);
+            File.AppendAllText(f, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + m + Environment.NewLine);
+        }
+        catch { }
     }
 }
 
@@ -1337,6 +1887,7 @@ static class Fluent
     public const string IconFolder = "";
     public const string IconMinus = "";
     public const string IconPlus = "";
+    public const string IconMicrophone = "";
 
     static Fluent()
     {
@@ -2520,7 +3071,7 @@ class SettingsForm : Form
     readonly StackPage _general, _speakers, _about;
     readonly List<NavItem> _nav = new List<NavItem>();
 
-    readonly ToggleSwitch _runAtLogin, _warnLow, _autoUpdate;
+    readonly ToggleSwitch _runAtLogin, _warnLow, _autoUpdate, _mics;
     readonly NumberStepper _threshold;
     readonly SettingsCard _thresholdCard;
     readonly string _logPath, _dir;
@@ -2597,6 +3148,13 @@ class SettingsForm : Form
                      + "and earbuds are left alone so holding them awake cannot drain them. "
                      + "A speaker that is switched off stays here so you can still configure it.";
         _speakers.Controls.Add(devNote);
+
+        _mics = new ToggleSwitch();
+        _mics.Toggled += (s, e) => OnMicrophonesToggled();
+        _speakers.Controls.Add(Card(Fluent.IconMicrophone, "Turn off speaker microphones",
+            "Stops Teams, Discord and game voice chat from using a speaker as a microphone, which "
+            + "switches it to call-quality sound. Your other microphones are used instead. Earbuds "
+            + "and headsets keep theirs. Needs administrator approval once.", _mics));
 
         _about.Controls.Add(Head("About"));
         var version = Card(Fluent.IconInfo, "Speaker Keeper", "Version " + Project.ShortVersion, null);
@@ -2742,6 +3300,42 @@ class SettingsForm : Form
         Raise();
     }
 
+    void OnMicrophonesToggled()
+    {
+        if (_loading) return;
+        bool off = _mics.On;
+        int rc = Microphones.SetElevated(off);
+
+        if (rc == Microphones.Done) { ReloadFromSettings(); return; }
+
+        if (rc == Microphones.NotKeptOff)
+        {
+            // The setting took, and the microphones are off right now, but no task could be
+            // created to keep them off. Say so rather than leave a switch that quietly stops
+            // working the next time a speaker is re-paired.
+            ReloadFromSettings();
+            MessageBox.Show(this,
+                "Speaker microphones are off now.\n\nThey will not be switched off again by "
+                + "themselves after a speaker is re-paired, because this copy of Speaker Keeper "
+                + "is not the one installed in Program Files. Install it with Install.exe and "
+                + "turn this on again for that.",
+                "Speaker Keeper", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        _loading = true;
+        _mics.SetSilently(!off);
+        _loading = false;
+        MessageBox.Show(this,
+            (off ? "Speaker microphones were not turned off." : "Speaker microphones were not turned back on.")
+            + "\n\n" + (rc == Microphones.Refused
+                ? "This changes a Windows device setting and a scheduled task that runs as the "
+                  + "system account, so Windows has to ask for permission. The permission prompt "
+                  + "was dismissed or refused, so nothing was changed."
+                : "Something went wrong (error " + rc + "). The log has the details."),
+            "Speaker Keeper", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
     void UpdateEnabled()
     {
         _threshold.Enabled = _warnLow.On;
@@ -2755,8 +3349,9 @@ class SettingsForm : Form
     /// </summary>
     void LoadDevices()
     {
-        // Everything after the heading and the note is a device row from last time.
-        for (int i = _speakers.Controls.Count - 1; i >= 2; i--)
+        // Everything after the heading, the note and the microphone switch is a device row
+        // from last time.
+        for (int i = _speakers.Controls.Count - 1; i >= 3; i--)
         {
             var c = _speakers.Controls[i];
             _speakers.Controls.RemoveAt(i);
@@ -2774,7 +3369,7 @@ class SettingsForm : Form
             string advice = Health.Advice();
             if (advice != null)
             {
-                rows.Add(Card(Fluent.IconWarning, "Your speaker keeps disconnecting", advice, null));
+                rows.Add(Card(Fluent.IconWarning, "Your speaker keeps switching off", advice, null));
                 notices++;
             }
 
@@ -2911,6 +3506,7 @@ class SettingsForm : Form
             _warnLow.SetSilently(Settings.WarnLowBattery);
             _threshold.SetSilently(Settings.LowBatteryThreshold);
             _autoUpdate.SetSilently(Settings.AutoUpdate);
+            _mics.SetSilently(Microphones.Enabled);
             UpdateEnabled();
             if (_speakers.Visible) LoadDevices();
         }
@@ -3108,6 +3704,7 @@ class Silence
     Thread _thread;
     ManualResetEvent _stop;
     DateTime _startedAt;
+    DateTime _upAt;      // when the stream actually came up, for "held for" on a drop
     volatile string _error;
     volatile int _hr;
 
@@ -3245,6 +3842,7 @@ class Silence
             // A stream that actually came up clears the debt from previous failures.
             _backoffSeconds = 0;
             _retryAt = DateTime.MinValue;
+            _upAt = DateTime.UtcNow;
             Program.Log("keeping " + Label + " awake");
 
             while (!_stop.WaitOne(FeedMs))
@@ -3309,7 +3907,9 @@ class Silence
             : Math.Min(_backoffSeconds * 2, BackoffMax);
         _retryAt = DateTime.UtcNow.AddSeconds(_backoffSeconds);
 
-        Program.Log(Label + ": " + why);
+        // How long it was held is the first thing to look at: a speaker that keeps going
+        // at the same number of minutes has a timer in it, and that is not a Bluetooth fault.
+        Program.Log(Label + ": " + why + (wasUp ? ", held for " + HeldFor : ""));
 
         // Only a stream that was actually up counts as the speaker dropping. One that
         // never started failed for some other reason, and calling that a disconnection
@@ -3351,6 +3951,18 @@ class Silence
     /// them, so this reads the HRESULT rather than the sentence built from it.
     /// </summary>
     public bool Disconnected { get { return _hr == unchecked((int)0x88890004); } }
+
+    /// <summary>How long the stream has been up, as "14m55s".</summary>
+    public string HeldFor
+    {
+        get
+        {
+            var t = DateTime.UtcNow - _upAt;
+            return t.TotalHours >= 1
+                ? (int)t.TotalHours + "h" + t.Minutes.ToString("00") + "m"
+                : (int)t.TotalMinutes + "m" + t.Seconds.ToString("00") + "s";
+        }
+    }
 }
 
 /// <summary>
@@ -3388,7 +4000,7 @@ static class Health
     class Flapping { public string Name; public List<DateTime> At = new List<DateTime>(); }
 
     /// <summary>A reading taken under the lock, safe to walk afterwards.</summary>
-    class Reading { public string Name; public int Count; public TimeSpan Within; }
+    class Reading { public Guid Container; public string Name; public int Count; public TimeSpan Within; }
 
     static readonly Dictionary<Guid, Flapping> _drops = new Dictionary<Guid, Flapping>();
     static readonly object _lock = new object();
@@ -3418,14 +4030,15 @@ static class Health
         lock (_lock)
         {
             Reading worst = null;
-            foreach (var f in _drops.Values)
+            foreach (var kv in _drops)
                 foreach (var rule in Rules)
                 {
+                    var f = kv.Value;
                     var cutoff = DateTime.UtcNow - rule.Within;
                     int n = f.At.FindAll(delegate (DateTime t) { return t >= cutoff; }).Count;
                     if (n < rule.Drops) continue;
                     if (worst == null || n > worst.Count)
-                        worst = new Reading { Name = f.Name, Count = n, Within = rule.Within };
+                        worst = new Reading { Container = kv.Key, Name = f.Name, Count = n, Within = rule.Within };
                 }
             return worst;
         }
@@ -3443,16 +4056,31 @@ static class Health
         var worst = Worst();
         if (worst == null) return null;
 
+        string times = worst.Count + " times in the last "
+                       + (worst.Within.TotalHours <= 1 ? "hour" : worst.Within.TotalHours + " hours");
+
+        // What the last drop looked like decides what to say, because the three causes
+        // want three different things done. This used to go straight to the Bluetooth
+        // connection and the adapters, which sent the user this was written for off to
+        // remove hardware while the real cause was a microphone being opened by a game.
+        var last = Activity.LastDeparture(worst.Container);
+        if (last != null && last.InCall)
+            return worst.Name + " has switched off " + times + ", the last time in call mode: "
+                   + last.CallBy + " had its microphone open. Voice chat and calls open the"
+                   + " speaker's microphone when it is Windows' microphone for calls. Choose"
+                   + " another one for calls in Sound settings, or turn off Handsfree Telephony"
+                   + " for the speaker in Devices and Printers, and it stays in music mode.";
+
+        if (last != null && last.TimerMinutes > 0)
+            return worst.Name + " has switched off " + times + ", the last time "
+                   + last.TimerMinutes + " minutes after it last played anything. That is the"
+                   + " speaker's own auto-off timer, not the Bluetooth connection.";
+
         var lines = new List<string>();
-        lines.Add(worst.Name + " has disconnected " + worst.Count + " times in the last "
-                  + (worst.Within.TotalHours <= 1 ? "hour" : worst.Within.TotalHours + " hours")
-                  + ". Speaker Keeper reconnects it each time, but the drops are the"
-                  + " Bluetooth connection itself, not the app.");
+        lines.Add(worst.Name + " has disconnected " + times + ". Speaker Keeper reconnects it"
+                  + " each time, but the drops are the Bluetooth connection itself, not the app.");
 
-        List<DeviceProps.Radio> radios;
-        try { radios = DeviceProps.Radios(); }
-        catch { return string.Join(" ", lines.ToArray()); }
-
+        var radios = Adapters();
         var broken = radios.FindAll(delegate (DeviceProps.Radio r) { return r.Problem != 0; });
 
         if (radios.Count > 1)
@@ -3467,11 +4095,737 @@ static class Health
         return string.Join(" ", lines.ToArray());
     }
 
-    /// <summary>The adapters, for the line in Settings that lists them.</summary>
+    /// <summary>
+    /// The adapters Windows could use, for the advice and the line in Settings.
+    ///
+    /// A disabled one is left out. It is code 22, which reads like a fault, but it is
+    /// someone having switched it off in Device Manager, and Windows will not pick it at
+    /// startup, so it cannot be the adapter a speaker is dropping on. Counting it told a
+    /// user who had already fixed a two-adapter problem to go and fix it again.
+    /// </summary>
     public static List<DeviceProps.Radio> Adapters()
     {
-        try { return DeviceProps.Radios(); }
+        try { return DeviceProps.Radios().FindAll(delegate (DeviceProps.Radio r) { return !r.Disabled; }); }
         catch { return new List<DeviceProps.Radio>(); }
+    }
+}
+
+/// <summary>
+/// What every output and microphone is doing, written to the log as it changes.
+///
+/// The log used to record only what this app did. That left the one question every
+/// "it still switches off" report is about unanswerable from the log: when the speaker
+/// went, was anything actually playing to it, and had something opened its microphone?
+/// Both matter more than anything the app does. Voice chat opening a speaker's
+/// microphone moves the speaker onto its hands-free profile, call mode, and a speaker
+/// whose auto-off listens for music can then switch itself off with a game still
+/// audible through it. See docs/INVESTIGATION-auto-off.md for how this was found.
+///
+/// Sampled once a second on its own thread, never the UI one: the audio service can
+/// stall, and a stalled tray icon is worse than a missed sample. Nothing here changes
+/// anything. It only watches, so a failure costs a log line and nothing else.
+/// </summary>
+static class Activity
+{
+    const int SampleMs = 1000;
+
+    // An app has to have been playing, or stopped, for this long before it is logged.
+    // A browser flips its session on every pause, and a line per pause would bury the
+    // lines that matter.
+    const int SettleSeconds = 10;
+
+    // A microphone is logged sooner. It opening is the event most likely to explain a
+    // drop, and it is rare enough that there is no chatter to filter out.
+    const int MicSettleSeconds = 2;
+
+    // Volume is logged once the slider has stopped moving, not at every step of a drag.
+    const int VolumeSettleSeconds = 3;
+
+    const int SummaryMinutes = 5;
+    const int FormatEverySeconds = 15;
+
+    // -70 dB. Quieter than this counts as silence: some apps keep a stream running with a
+    // trace of noise in it, and calling that sound would hide the answer being looked for.
+    const float Audible = 0.0003f;
+
+    // How close to a round number of minutes a drop has to land to be called a timer.
+    // The speakers this was found on went at 14m54s to 15m20s, every time.
+    const int TimerSlackSeconds = 30;
+
+    class Endpoint
+    {
+        public string Id, Name;
+        public bool Capture, Bluetooth;
+        public Guid Container;
+        public IMMDevice Device;
+        public IAudioEndpointVolume Volume;
+        public IAudioSessionManager2 Sessions;
+        public string Format;
+
+        // False for anything already connected when the app started: then Since is when
+        // watching began, and "connected for" would be a guess dressed up as a fact.
+        public bool SinceIsConnect;
+        public DateTime Since;
+
+        public float Level = -1, PendingLevel = -1;
+        public bool Muted, PendingMuted;
+        public DateTime PendingAt;
+
+        public readonly Dictionary<string, App> Apps = new Dictionary<string, App>(StringComparer.OrdinalIgnoreCase);
+
+        // Outputs only: what the speaker has actually been hearing, apart from us.
+        public DateTime LastSound = DateTime.MinValue, LastMusicSound = DateTime.MinValue;
+        public string LastSoundFrom;
+        public int SoundSeconds;
+        public float Loudest;
+        public readonly HashSet<string> Heard = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>One process on one endpoint. Several sessions of one app count as one.</summary>
+    class App
+    {
+        public bool Present, ActiveNow;   // this sample
+        public bool Seen;                 // settled-in-progress state
+        public DateTime Changed;          // when Seen last flipped
+        public bool Logged;               // what the log last said
+    }
+
+    /// <summary>A speaker with its microphone open, which is call mode.</summary>
+    class Call
+    {
+        public DateTime Since;
+        public DateTime Ended = DateTime.MaxValue;
+        public readonly List<string> By = new List<string>();
+        public string Was = "";
+    }
+
+    /// <summary>How a speaker's last disconnection looked. Read by Health.</summary>
+    public class Departure
+    {
+        public DateTime At;
+        public string Name;
+        public bool InCall;
+        public string CallBy;
+        public int TimerMinutes;   // 0 unless it went a round number of minutes after its last sound
+    }
+
+    static Thread _thread;
+    static int _ownPid;
+    static readonly Dictionary<string, Endpoint> _eps = new Dictionary<string, Endpoint>(StringComparer.OrdinalIgnoreCase);
+    static readonly Dictionary<string, string> _roles = new Dictionary<string, string>();
+    static readonly Dictionary<Guid, Call> _calls = new Dictionary<Guid, Call>();
+    static readonly Dictionary<uint, string> _names = new Dictionary<uint, string>();
+
+    static readonly object _lock = new object();
+    static readonly Dictionary<Guid, Departure> _departures = new Dictionary<Guid, Departure>();
+
+    public static Departure LastDeparture(Guid container)
+    {
+        lock (_lock)
+        {
+            Departure d;
+            return _departures.TryGetValue(container, out d) ? d : null;
+        }
+    }
+
+    public static void Start()
+    {
+        if (_thread != null) return;
+        _ownPid = System.Diagnostics.Process.GetCurrentProcess().Id;
+        _thread = new Thread(Run);
+        _thread.IsBackground = true;
+        _thread.Name = "Speaker Keeper activity";
+        _thread.SetApartmentState(ApartmentState.MTA);
+        _thread.Start();
+    }
+
+    static void Run()
+    {
+        IMMDeviceEnumerator en = null;
+        bool first = true;
+        var nextSummary = DateTime.Now.AddMinutes(SummaryMinutes);
+        var nextFormat = DateTime.MinValue;
+        var quietUntil = DateTime.MinValue;
+
+        while (true)
+        {
+            try
+            {
+                if (en == null) en = (IMMDeviceEnumerator)new MMDeviceEnumeratorClass();
+
+                bool formats = DateTime.Now >= nextFormat;
+                if (formats) nextFormat = DateTime.Now.AddSeconds(FormatEverySeconds);
+
+                Sample(en, first, formats);
+                first = false;
+
+                if (DateTime.Now >= nextSummary)
+                {
+                    nextSummary = DateTime.Now.AddMinutes(SummaryMinutes);
+                    Summarise();
+                }
+            }
+            catch (Exception ex)
+            {
+                // At most once every ten minutes: a broken audio service would otherwise
+                // put this in the log every second until it came back.
+                if (DateTime.Now >= quietUntil)
+                {
+                    Program.Log("activity: sample failed: " + ex.Message);
+                    quietUntil = DateTime.Now.AddMinutes(10);
+                }
+                foreach (var e in _eps.Values) Close(e);
+                _eps.Clear();
+                Release(en);
+                en = null;
+            }
+            Thread.Sleep(SampleMs);
+        }
+    }
+
+    static void Sample(IMMDeviceEnumerator en, bool first, bool formats)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (int flow in new[] { 0, 1 })
+        {
+            IntPtr raw;
+            if (en.EnumAudioEndpoints(flow, 1, out raw) != 0 || raw == IntPtr.Zero) continue;
+            var col = (IMMDeviceCollection)Marshal.GetObjectForIUnknown(raw);
+            Marshal.Release(raw);
+            try
+            {
+                uint n;
+                if (col.GetCount(out n) != 0) continue;
+                for (uint i = 0; i < n; i++)
+                {
+                    IMMDevice d;
+                    if (col.Item(i, out d) != 0 || d == null) continue;
+                    string id;
+                    if (d.GetId(out id) != 0 || id == null) { Release(d); continue; }
+                    seen.Add(id);
+                    if (_eps.ContainsKey(id)) { Release(d); continue; }
+                    _eps[id] = Open(d, id, flow == 1, first);
+                }
+            }
+            finally { Release(col); }
+        }
+
+        // Microphones before outputs. A speaker powering off takes its microphone first,
+        // a second ahead of its output, and the output's farewell line needs to know the
+        // microphone was open when it went.
+        foreach (bool capture in new[] { true, false })
+            foreach (var id in new List<string>(_eps.Keys))
+            {
+                var e = _eps[id];
+                if (e.Capture != capture || seen.Contains(id)) continue;
+                Gone(e);
+                Close(e);
+                _eps.Remove(id);
+            }
+
+        foreach (var e in _eps.Values)
+        {
+            try { Watch(e, formats); }
+            catch { }   // one endpoint going away mid-read must not cost the others their sample
+        }
+
+        Role(en, 0, 2, "default output for calls", first);
+        Role(en, 1, 0, "default microphone", first);
+        Role(en, 1, 2, "default microphone for calls", first);
+    }
+
+    static Endpoint Open(IMMDevice d, string id, bool capture, bool first)
+    {
+        var e = new Endpoint();
+        e.Id = id;
+        e.Device = d;
+        e.Capture = capture;
+        e.Since = DateTime.Now;
+        e.SinceIsConnect = !first;
+        e.Name = DeviceProps.EndpointName(id) ?? id;
+        e.Bluetooth = DeviceProps.IsBluetoothEndpoint(id);
+        Guid c;
+        if (DeviceProps.TryContainer(id, out c)) e.Container = c;
+
+        object o;
+        var iid = typeof(IAudioSessionManager2).GUID;
+        if (d.Activate(ref iid, 23, IntPtr.Zero, out o) == 0) e.Sessions = o as IAudioSessionManager2;
+        if (!capture)
+        {
+            iid = typeof(IAudioEndpointVolume).GUID;
+            if (d.Activate(ref iid, 23, IntPtr.Zero, out o) == 0) e.Volume = o as IAudioEndpointVolume;
+            ReadVolume(e, out e.Level, out e.Muted);
+        }
+        e.Format = FormatOf(d);
+
+        if (e.Bluetooth)
+            Program.Log((first ? "present: " : "connected: ") + Describe(e));
+        return e;
+    }
+
+    static string Describe(Endpoint e)
+    {
+        string s = e.Name + (e.Format != null ? ", " + e.Format : "");
+        if (!e.Capture && e.Level >= 0) s += ", volume " + Percent(e.Level) + (e.Muted ? " (muted)" : "");
+        return s;
+    }
+
+    static void Watch(Endpoint e, bool formats)
+    {
+        var now = DateTime.Now;
+
+        if (e.Bluetooth && !e.Capture) WatchVolume(e, now);
+
+        if (formats && e.Bluetooth)
+        {
+            // A speaker changing format is it changing profile: stereo music one moment,
+            // 16 kHz mono calls the next.
+            var f = FormatOf(e.Device);
+            if (f != null && f != e.Format)
+            {
+                Program.Log(e.Name + ": format " + (e.Format ?? "unknown") + " -> " + f);
+                e.Format = f;
+            }
+        }
+
+        foreach (var a in e.Apps.Values) { a.Present = false; a.ActiveNow = false; }
+
+        float loudest = 0;
+        string loudestFrom = null;
+        IAudioSessionEnumerator list;
+        if (e.Sessions != null && e.Sessions.GetSessionEnumerator(out list) == 0 && list != null)
+        {
+            try
+            {
+                int n;
+                list.GetCount(out n);
+                for (int i = 0; i < n; i++)
+                {
+                    IAudioSessionControl2 s;
+                    if (list.GetSession(i, out s) != 0 || s == null) continue;
+                    try
+                    {
+                        uint pid;
+                        s.GetProcessId(out pid);
+                        if (pid == _ownPid) continue;   // our own silence is not what anyone is asking about
+
+                        int state;
+                        s.GetState(out state);
+                        if (state == 2) continue;       // expired
+
+                        string name = s.IsSystemSoundsSession() == 0 ? "Windows sounds" : ProcessName(pid);
+                        App a;
+                        if (!e.Apps.TryGetValue(name, out a)) e.Apps[name] = a = new App { Changed = now };
+                        a.Present = true;
+                        if (state == 1) a.ActiveNow = true;
+
+                        if (!e.Capture && state == 1)
+                        {
+                            var meter = s as IAudioMeterInformation;
+                            float peak;
+                            if (meter != null && meter.GetPeakValue(out peak) == 0 && peak > loudest)
+                            {
+                                loudest = peak;
+                                loudestFrom = name;
+                            }
+                        }
+                    }
+                    finally { Release(s); }
+                }
+            }
+            finally { Release(list); }
+        }
+
+        foreach (var kv in new List<KeyValuePair<string, App>>(e.Apps))
+        {
+            var a = kv.Value;
+            if (a.ActiveNow != a.Seen) { a.Seen = a.ActiveNow; a.Changed = now; }
+
+            int settle = e.Capture ? MicSettleSeconds : SettleSeconds;
+            if (a.Seen != a.Logged && (now - a.Changed).TotalSeconds >= settle)
+            {
+                a.Logged = a.Seen;
+                if (e.Capture) MicChanged(e, kv.Key, a);
+                else Program.Log(kv.Key + (a.Logged ? " playing to " : " stopped playing to ") + e.Name
+                                 + " (" + (a.Logged ? "from " : "at ") + a.Changed.ToString("HH:mm:ss") + ")");
+            }
+
+            if (!a.Present && !a.Seen && !a.Logged) e.Apps.Remove(kv.Key);
+        }
+
+        if (e.Capture) return;
+
+        if (loudest > e.Loudest) e.Loudest = loudest;
+        if (loudest >= Audible)
+        {
+            e.SoundSeconds += SampleMs / 1000;
+            e.LastSound = now;
+            e.LastSoundFrom = loudestFrom;
+            e.Heard.Add(loudestFrom);
+            if (CallOf(e.Container, now) == null) e.LastMusicSound = now;
+        }
+    }
+
+    static void WatchVolume(Endpoint e, DateTime now)
+    {
+        float level;
+        bool muted;
+        if (!ReadVolume(e, out level, out muted)) return;
+        if (Math.Abs(level - e.Level) < 0.005f && muted == e.Muted) return;
+
+        if (Math.Abs(level - e.PendingLevel) >= 0.005f || muted != e.PendingMuted)
+        {
+            e.PendingLevel = level;
+            e.PendingMuted = muted;
+            e.PendingAt = now;
+            return;
+        }
+        if ((now - e.PendingAt).TotalSeconds < VolumeSettleSeconds) return;
+
+        Program.Log("volume " + e.Name + ": " + Percent(e.Level) + (e.Muted ? " muted" : "")
+                    + " -> " + Percent(level) + (muted ? " muted" : ""));
+        e.Level = level;
+        e.Muted = muted;
+    }
+
+    static bool ReadVolume(Endpoint e, out float level, out bool muted)
+    {
+        level = -1;
+        muted = false;
+        if (e.Volume == null) return false;
+        return e.Volume.GetMasterVolumeLevelScalar(out level) == 0 && e.Volume.GetMute(out muted) == 0;
+    }
+
+    static void MicChanged(Endpoint e, string app, App a)
+    {
+        Call call = null;
+        if (e.Bluetooth && e.Container != Guid.Empty)
+        {
+            if (!_calls.TryGetValue(e.Container, out call) || call.Ended != DateTime.MaxValue)
+            {
+                if (!a.Logged) call = null;
+                else _calls[e.Container] = call = new Call { Since = a.Changed };
+            }
+        }
+
+        if (a.Logged)
+        {
+            if (call != null && !call.By.Contains(app)) call.By.Add(app);
+            Program.Log(app + " opened the microphone " + e.Name
+                        + (call != null ? " - that speaker is in call mode for as long as it stays open" : ""));
+            return;
+        }
+
+        Program.Log(app + " closed the microphone " + e.Name);
+        if (call == null) return;
+        call.By.Remove(app);
+        if (call.By.Count > 0) return;
+        call.Ended = DateTime.Now;
+        Program.Log(e.Name + ": back out of call mode after " + Dur(call.Ended - call.Since));
+    }
+
+    /// <summary>The call a speaker is in, or was in until a moment ago.</summary>
+    static Call CallOf(Guid container, DateTime now)
+    {
+        Call c;
+        if (container == Guid.Empty || !_calls.TryGetValue(container, out c)) return null;
+        if (c.Ended == DateTime.MaxValue) return c;
+        // Ended by the microphone vanishing a second ahead of the output: the output's
+        // departure still happened in call mode.
+        return c.Was.Length > 0 && (now - c.Ended).TotalSeconds < 10 ? c : null;
+    }
+
+    static void Gone(Endpoint e)
+    {
+        var now = DateTime.Now;
+        if (!e.Bluetooth) return;
+
+        if (e.Capture)
+        {
+            Call c;
+            if (e.Container != Guid.Empty && _calls.TryGetValue(e.Container, out c) && c.Ended == DateTime.MaxValue)
+            {
+                c.Was = string.Join(", ", c.By.ToArray());
+                c.Ended = now;
+                Program.Log("disconnected: " + e.Name + ", while " + c.Was + " had it open");
+            }
+            else Program.Log("disconnected: " + e.Name);
+            return;
+        }
+
+        var parts = new List<string>();
+        parts.Add("disconnected: " + e.Name + (e.SinceIsConnect
+            ? " after " + Dur(now - e.Since) + " connected"
+            : ", connected before Speaker Keeper started, watched for " + Dur(now - e.Since)));
+
+        parts.Add(e.LastSound == DateTime.MinValue
+            ? "nothing but Speaker Keeper played to it" + (e.SinceIsConnect ? "" : " since then")
+            : "last sound " + Dur(now - e.LastSound) + " before, from " + e.LastSoundFrom);
+
+        var call = CallOf(e.Container, now);
+        if (call != null)
+        {
+            string by = call.By.Count > 0 ? string.Join(", ", call.By.ToArray()) : call.Was;
+            parts.Add("in call mode since " + call.Since.ToString("HH:mm:ss") + " (" + by + " had its microphone open)");
+            if (e.LastMusicSound != e.LastSound)
+                parts.Add(e.LastMusicSound == DateTime.MinValue
+                    ? "no sound in music mode at all"
+                    : "last sound in music mode " + Dur(now - e.LastMusicSound) + " before");
+        }
+
+        // Measured from the last sound the speaker heard as music, or from connecting.
+        // Only meaningful when the connection time is real.
+        int timer = 0;
+        var from = e.LastMusicSound > e.Since ? e.LastMusicSound : e.Since;
+        if (e.SinceIsConnect || e.LastMusicSound > e.Since)
+        {
+            var quiet = now - from;
+            foreach (int m in new[] { 5, 10, 15, 20, 30, 60 })
+                if (Math.Abs(quiet.TotalSeconds - m * 60) <= TimerSlackSeconds) { timer = m; break; }
+            if (timer > 0)
+                parts.Add("that is " + Dur(quiet) + " after its last music-mode sound, which is the"
+                          + " speaker's own " + timer + "-minute auto-off, not a lost connection");
+        }
+
+        Program.Log(string.Join("; ", parts.ToArray()));
+
+        lock (_lock)
+        {
+            if (e.Container != Guid.Empty)
+                _departures[e.Container] = new Departure
+                {
+                    At = now, Name = e.Name, InCall = call != null,
+                    CallBy = call == null ? null : (call.By.Count > 0 ? string.Join(", ", call.By.ToArray()) : call.Was),
+                    TimerMinutes = timer
+                };
+        }
+    }
+
+    static void Summarise()
+    {
+        var now = DateTime.Now;
+        foreach (var e in _eps.Values)
+        {
+            if (e.Capture || !e.Bluetooth) continue;
+
+            string what = e.SoundSeconds == 0
+                ? "silent apart from Speaker Keeper"
+                : "sound for " + e.SoundSeconds + "s, loudest " + Db(e.Loudest)
+                  + ", from " + string.Join(", ", new List<string>(e.Heard).ToArray());
+
+            var call = CallOf(e.Container, now);
+            string mode = call != null
+                ? "call mode, " + string.Join(", ", call.By.ToArray()) + " has its microphone"
+                : "music mode";
+
+            Program.Log("activity " + e.Name + ", last " + SummaryMinutes + " min: " + what + "; "
+                        + mode + (e.Format != null ? ", " + e.Format : "")
+                        + (e.Level >= 0 ? ", volume " + Percent(e.Level) + (e.Muted ? " muted" : "") : ""));
+
+            e.SoundSeconds = 0;
+            e.Loudest = 0;
+            e.Heard.Clear();
+        }
+
+        // Process ids get reused. Forgetting the names now and then keeps a new process
+        // from being logged under a dead one's name.
+        _names.Clear();
+    }
+
+    const string SameAsDefault = "(same as the default output)";
+    const int RoleSettleSeconds = 3;
+    static readonly Dictionary<string, KeyValuePair<string, DateTime>> _pendingRoles =
+        new Dictionary<string, KeyValuePair<string, DateTime>>();
+
+    static void Role(IMMDeviceEnumerator en, int flow, int role, string label, bool first)
+    {
+        string id;
+        string name = DefaultName(en, flow, role, out id);
+
+        // The output for calls is the default output on nearly every PC, and logging it
+        // then only doubles every "default output changed" line. It earns a line only
+        // when the two differ.
+        if (flow == 0 && role == 2)
+        {
+            string ignored;
+            if (name == DefaultName(en, 0, 0, out ignored)) name = SameAsDefault;
+        }
+
+        string was;
+        bool known = _roles.TryGetValue(label, out was);
+        if (known && was == name) { _pendingRoles.Remove(label); return; }
+
+        // A speaker disconnecting moves every role, not all within the same second, and a
+        // monitor waking and sleeping again flaps them. Waiting for the value to hold
+        // keeps one change from being logged as two.
+        if (!first)
+        {
+            KeyValuePair<string, DateTime> p;
+            if (!_pendingRoles.TryGetValue(label, out p) || p.Key != name)
+            {
+                _pendingRoles[label] = new KeyValuePair<string, DateTime>(name, DateTime.Now);
+                return;
+            }
+            if ((DateTime.Now - p.Value).TotalSeconds < RoleSettleSeconds) return;
+            _pendingRoles.Remove(label);
+        }
+
+        _roles[label] = name;
+        if (name == SameAsDefault)
+        {
+            if (known) Program.Log(label + " follows the default output again");
+            return;
+        }
+
+        string line = label + (first ? " is " : " -> ") + name;
+
+        // The one to warn about. Discord, Teams and game voice chat open the microphone
+        // for calls, not the ordinary default, and Settings does not show it: it is the
+        // "Default Communication Device" in the old Sound control panel. So a user can
+        // look, see their webcam as the default microphone, and be right, while the
+        // speaker's microphone is the one their games are opening.
+        if (flow == 1 && role == 2 && id != null && DeviceProps.IsBluetoothEndpoint(id))
+            line += " - this is Windows' Default Communication Device, separate from the default"
+                  + " microphone; voice chat and calls open it, which puts that speaker in call mode";
+
+        Program.Log(line);
+    }
+
+    static string DefaultName(IMMDeviceEnumerator en, int flow, int role, out string id)
+    {
+        id = null;
+        IMMDevice d;
+        if (en.GetDefaultAudioEndpoint(flow, role, out d) != 0 || d == null) return "none";
+        try
+        {
+            if (d.GetId(out id) != 0 || id == null) return "none";
+            return DeviceProps.EndpointName(id) ?? id;
+        }
+        finally { Release(d); }
+    }
+
+    static string FormatOf(IMMDevice d)
+    {
+        object o;
+        var iid = typeof(IAudioClient).GUID;
+        if (d == null || d.Activate(ref iid, 23, IntPtr.Zero, out o) != 0 || o == null) return null;
+        try
+        {
+            IntPtr f;
+            if (((IAudioClient)o).GetMixFormat(out f) != 0 || f == IntPtr.Zero) return null;
+            try
+            {
+                int ch = (ushort)Marshal.ReadInt16(f, 2);
+                int rate = Marshal.ReadInt32(f, 4);
+                return rate + " Hz " + (ch == 1 ? "mono" : ch == 2 ? "stereo" : ch + " channels");
+            }
+            finally { Marshal.FreeCoTaskMem(f); }
+        }
+        finally { Release(o); }
+    }
+
+    static string ProcessName(uint pid)
+    {
+        string n;
+        if (_names.TryGetValue(pid, out n)) return n;
+        try { using (var p = System.Diagnostics.Process.GetProcessById((int)pid)) n = p.ProcessName + ".exe"; }
+        catch { n = "process " + pid; }
+        _names[pid] = n;
+        return n;
+    }
+
+    static void Close(Endpoint e)
+    {
+        Release(e.Sessions);
+        Release(e.Volume);
+        Release(e.Device);
+        e.Sessions = null;
+        e.Volume = null;
+        e.Device = null;
+    }
+
+    static void Release(object o)
+    {
+        if (o == null) return;
+        try { Marshal.FinalReleaseComObject(o); } catch { }
+    }
+
+    static string Percent(float level) { return Math.Round(level * 100) + "%"; }
+
+    static string Db(float peak) { return peak <= 0 ? "silent" : Math.Round(20 * Math.Log10(peak)) + " dB"; }
+
+    static string Dur(TimeSpan t)
+    {
+        if (t.TotalHours >= 1) return (int)t.TotalHours + "h" + t.Minutes.ToString("00") + "m";
+        return (int)t.TotalMinutes + "m" + t.Seconds.ToString("00") + "s";
+    }
+}
+
+/// <summary>
+/// Logs the display turning off, dimming and coming back on.
+///
+/// The display on the machine this was found on turns off after 15 minutes idle, which
+/// is also how long its speakers lasted, and whether one causes the other cannot be told
+/// without both in the same log. A sleeping monitor also takes its HDMI audio output
+/// away, which reshuffles the default output, so it earns its place regardless.
+///
+/// GUID_CONSOLE_DISPLAY_STATE, not the PowerModeChanged event the app already logs:
+/// that one is the whole machine sleeping, and says nothing about the screen. Windows
+/// sends the current state the moment this registers, so the first line after startup
+/// says what the display was doing then.
+/// </summary>
+class DisplayWatch : NativeWindow
+{
+    static readonly Guid ConsoleDisplayState = new Guid("6FE69556-704A-47A0-8F24-C28D936FDA47");
+    const int WM_POWERBROADCAST = 0x0218;
+    const int PBT_POWERSETTINGCHANGE = 0x8013;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    static extern IntPtr RegisterPowerSettingNotification(IntPtr recipient, ref Guid setting, int flags);
+
+    static DisplayWatch _instance;
+    int _last = -1;
+
+    /// <summary>Must run on the UI thread: the notifications arrive through its message loop.</summary>
+    public static void Start()
+    {
+        if (_instance != null) return;
+        try
+        {
+            var w = new DisplayWatch();
+            // A hidden top-level window. Not a message-only one: those are left out of
+            // power broadcasts, and this is not the place to find out which ones.
+            w.CreateHandle(new CreateParams());
+            var g = ConsoleDisplayState;
+            if (RegisterPowerSettingNotification(w.Handle, ref g, 0) == IntPtr.Zero)
+                Program.Log("display state unavailable: error " + Marshal.GetLastWin32Error());
+            _instance = w;
+        }
+        catch (Exception ex) { Program.Log("display state unavailable: " + ex.Message); }
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == WM_POWERBROADCAST && (int)m.WParam == PBT_POWERSETTINGCHANGE && m.LParam != IntPtr.Zero)
+        {
+            // POWERBROADCAST_SETTING: the setting's GUID, a DWORD length, then the value.
+            var setting = (Guid)Marshal.PtrToStructure(m.LParam, typeof(Guid));
+            if (setting == ConsoleDisplayState)
+            {
+                int state = Marshal.ReadInt32(m.LParam, 20);
+                if (state != _last)
+                {
+                    bool first = _last == -1;
+                    _last = state;
+                    Program.Log("display " + (state == 0 ? "off" : state == 1 ? "on" : state == 2 ? "dimmed" : "state " + state)
+                                + (first ? " (at startup)" : ""));
+                }
+            }
+            m.Result = (IntPtr)1;
+            return;
+        }
+        base.WndProc(ref m);
     }
 }
 
@@ -3517,7 +4871,8 @@ static class Keeper
     /// Brings the set of live streams in line with the set of speakers that should be
     /// held. Called on every tick, so it is also what restarts a stream that died.
     /// </summary>
-    public static void Apply(List<DeviceProps.AudioDevice> wanted, DeviceProps.Snapshot snap)
+    public static void Apply(List<DeviceProps.AudioDevice> wanted, DeviceProps.Snapshot snap,
+                             Dictionary<string, string> reasons)
     {
         // One physical speaker can publish a live endpoint on each Bluetooth radio the PC
         // has, so the same speaker can appear twice. Holding both would open two streams
@@ -3546,24 +4901,36 @@ static class Keeper
             var s = _held[id];
             _held.Remove(id);
 
+            string why;
+            reasons.TryGetValue(id, out why);
+
             if (s.Disconnected)
             {
                 // The stream already noticed and said so. Nothing to add.
             }
-            else if (!present.Contains(id))
+            else if (!present.Contains(id) || why == Program.Unidentified)
             {
+                // Unidentified is the same disconnection seen from the other side. A
+                // speaker powering off takes its Bluetooth device nodes away a moment
+                // before its audio output, so for one tick the output is still there
+                // with nothing behind it. That read as "letting it sleep", a decision,
+                // at exactly the moment the speaker switched itself off.
                 // A disconnection this tick saw before the stream thread did. The stream
                 // polls every 500ms and the policy runs every 5s, so whenever a speaker
                 // vanishes in that last half second it is Stop() that ends the stream,
                 // cleanly, and nothing ever records a failure. Left unhandled this reads
                 // in the log as a decision the app made, and never reaches the count that
                 // decides whether the user is told their speaker keeps dropping.
-                Program.Log(s.Label + ": the speaker disconnected");
+                Program.Log(s.Label + ": the speaker disconnected, held for " + s.HeldFor);
                 Health.RecordDrop(s.Container, s.Label);
             }
             else
             {
-                Program.Log("letting " + s.Label + " sleep");
+                // Present, wanted by nobody. With no reason it lost to another output of
+                // the same speaker, which Apply's container check above allows only one of.
+                Program.Log("letting " + s.Label + " sleep - "
+                            + (why ?? "another output of the same speaker is held instead")
+                            + ", held for " + s.HeldFor);
             }
 
             s.Stop();
@@ -3646,31 +5013,61 @@ static class Program
     static DateTime _batteryAt = DateTime.MinValue;    // when the last change was observed
     static DateTime _batteryStamp = DateTime.MinValue; // device's own timestamp for it
 
-    const long MaxLogBytes = 1024 * 1024;   // rotate at 1 MB, keep one previous file
+    // Rotate at 4 MB and keep three previous files: SpeakerKeeper.log.1 is the newest.
+    //
+    // It used to be 1 MB and one previous file, which was weeks when the log said little.
+    // Activity now records what every speaker was hearing, and a speaker that "keeps
+    // switching off" is a pattern across days, so the history has to reach back that far.
+    // 16 MB at most, in a folder nobody backs up.
+    const long MaxLogBytes = 4 * 1024 * 1024;
+    const int KeepLogs = 3;
+
+    // The UI thread, every speaker's stream thread and Activity all write here. Two
+    // appends racing each other throw on the file share, and the loser's line is lost.
+    static readonly object _logLock = new object();
 
     internal static void Log(string m)
     {
-        try
+        lock (_logLock)
         {
-            if (!Directory.Exists(DataDir)) Directory.CreateDirectory(DataDir);
-
-            // Without this the log grows forever on a machine that's always on.
             try
             {
-                var fi = new FileInfo(LogFile);
-                if (fi.Exists && fi.Length > MaxLogBytes)
+                if (!Directory.Exists(DataDir)) Directory.CreateDirectory(DataDir);
+
+                // Without this the log grows forever on a machine that's always on.
+                try
                 {
-                    string old = LogFile + ".old";
-                    if (File.Exists(old)) File.Delete(old);
-                    File.Move(LogFile, old);
+                    var fi = new FileInfo(LogFile);
+                    if (fi.Exists && fi.Length > MaxLogBytes) RotateLogs();
                 }
+                catch { }
+
+                File.AppendAllText(LogFile,
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + m + Environment.NewLine);
             }
             catch { }
-
-            File.AppendAllText(LogFile,
-                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + m + Environment.NewLine);
         }
-        catch { }
+    }
+
+    static void RotateLogs()
+    {
+        string oldest = LogFile + "." + KeepLogs;
+        if (File.Exists(oldest)) File.Delete(oldest);
+        for (int i = KeepLogs - 1; i >= 1; i--)
+        {
+            string from = LogFile + "." + i;
+            if (File.Exists(from)) File.Move(from, LogFile + "." + (i + 1));
+        }
+        File.Move(LogFile, LogFile + ".1");
+
+        // Versions before 1.6 kept a single SpeakerKeeper.log.old. It is older than
+        // anything numbered, so it takes the first free slot after them rather than
+        // being thrown away; with no slot left it has aged out anyway.
+        string legacy = LogFile + ".old";
+        if (!File.Exists(legacy)) return;
+        for (int i = 2; i <= KeepLogs; i++)
+            if (!File.Exists(LogFile + "." + i)) { File.Move(legacy, LogFile + "." + i); return; }
+        File.Delete(legacy);
     }
 
     /// <summary>Friendly name of the current default output, for log lines.</summary>
@@ -3709,12 +5106,16 @@ static class Program
     /// supposed to sleep when they are put away; and it must not have been switched off
     /// for that particular device.
     /// </summary>
+    // A Bluetooth output whose device is not in the snapshot. Keeper treats it as a
+    // disconnection in progress, and checks for it through this rather than retyping it.
+    internal static readonly string Unidentified = "output device not identifiable";
+
     static bool ShouldKeepAwake(DeviceProps.AudioDevice d, DeviceProps.Snapshot snap, out string reason)
     {
         if (!d.IsBluetooth) { reason = "not a Bluetooth output"; return false; }
 
         var bt = snap.Of(d.Container);
-        if (bt == null) { reason = "output device not identifiable"; return false; }
+        if (bt == null) { reason = Unidentified; return false; }
 
         if (!snap.IsPlayable(d)) { reason = "this is the call channel, not the speaker"; return false; }
 
@@ -3743,6 +5144,7 @@ static class Program
     {
         var snap = DeviceProps.Read();
         var wanted = new List<DeviceProps.AudioDevice>();
+        var reasons = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         string defaultReason = "no default output";
 
         foreach (var d in snap.Outputs)
@@ -3751,10 +5153,11 @@ static class Program
 
             string reason;
             if (ShouldKeepAwake(d, snap, out reason)) wanted.Add(d);
+            else reasons[d.EndpointId] = reason;
             if (d.IsDefault) defaultReason = reason;
         }
 
-        Keeper.Apply(wanted, snap);
+        Keeper.Apply(wanted, snap, reasons);
 
         // What the tray says about the output you are actually listening through. The
         // other speakers being held are in the log and in Settings; the panel is about
@@ -3789,7 +5192,7 @@ static class Program
         try
         {
             _balloonClick = () => ShowSettings();
-            _tray.ShowBalloonTip(15000, "Your speaker keeps disconnecting",
+            _tray.ShowBalloonTip(15000, "Your speaker keeps switching off",
                 advice.Length > 250 ? advice.Substring(0, 247) + "..." : advice,
                 ToolTipIcon.Warning);
         }
@@ -4159,6 +5562,23 @@ static class Program
                 Environment.Exit(Updater.Apply(on));
                 return;
             }
+
+            // Invoked elevated by Settings > Speakers > Turn off speaker microphones.
+            // "off" means the microphones go off.
+            if (string.Equals(a, "--speaker-microphones", StringComparison.OrdinalIgnoreCase))
+            {
+                bool off = i + 1 < args.Length &&
+                           string.Equals(args[i + 1], "off", StringComparison.OrdinalIgnoreCase);
+                Environment.Exit(Microphones.Apply(off));
+                return;
+            }
+
+            // Invoked as SYSTEM by the Speaker Keeper Microphones task.
+            if (string.Equals(a, "--enforce-speaker-microphones", StringComparison.OrdinalIgnoreCase))
+            {
+                Environment.Exit(Microphones.EnforceFromTask());
+                return;
+            }
         }
         if (uninstall) { Installer.Uninstall(quiet); return; }
 
@@ -4174,6 +5594,10 @@ static class Program
             + ", exe " + Application.ExecutablePath);
         Settings.RepairRunPath();
         DetectVersionChange();
+        if (Microphones.Enabled)
+            Log("speaker microphones are set to off (Settings > Speakers); their Hands-Free"
+                + " profile is switched off whenever Windows sets one up");
+        Activity.Start();
 
         // Sleep/resume is when a keep-alive most often breaks: the Bluetooth link drops
         // and the media session can come back dead. Logging both edges makes it obvious
@@ -4201,6 +5625,14 @@ static class Program
 
         Microsoft.Win32.SystemEvents.SessionEnding += (s, e) =>
             Log("session ending: " + e.Reason);
+
+        // Locking matters for the same reason the display does: a locked PC turns its
+        // display off after a minute, not after the usual timeout.
+        Microsoft.Win32.SystemEvents.SessionSwitch += (s, e) =>
+            Log(e.Reason == Microsoft.Win32.SessionSwitchReason.SessionLock ? "PC locked"
+              : e.Reason == Microsoft.Win32.SessionSwitchReason.SessionUnlock ? "PC unlocked"
+              : "session: " + e.Reason);
+        DisplayWatch.Start();
         _lastDevice = DefaultDeviceId();
         ApplyPolicy();
         BuildTray();

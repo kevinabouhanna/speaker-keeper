@@ -49,6 +49,7 @@ It sits in your system tray and stays out of the way:
 | 🔋 **Shows your battery**   | One click on the tray icon shows your speaker's charge, and it warns you when it runs low.           |
 | 🎧 **Leaves earbuds alone** | Only works on Bluetooth _speakers_. It won't hold your earbuds awake and drain them.                 |
 | 🔀 **Follows your speaker** | Switch audio output and it follows along automatically.                                              |
+| 🎙️ **Keeps a speaker a speaker** | Optional. Stops Teams, Discord and games from using your speaker as a microphone, which makes it sound like a phone call and can make it switch off. Off unless you turn it on. |
 | 🪶 **Tiny**                 | A single small app that follows your Windows theme. No account, no background service, no telemetry. |
 
 ## Install
@@ -79,7 +80,7 @@ show hidden icons — drag it out to pin it).
   to close it.
 - **Hover** to see your speaker and its battery level without opening anything.
 - **The cog** on the panel opens Settings: the low-battery warning, which speakers to keep
-  awake, automatic updates and the activity log.
+  awake, whether speakers may be used as microphones, automatic updates and the activity log.
 - **The power button** next to it quits, letting your speaker go back to sleeping normally.
   It's on the right-click menu too.
 
@@ -119,7 +120,8 @@ Issues and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md),
 
 If you're reporting a bug, the log at `%LocalAppData%\Speaker Keeper\SpeakerKeeper.log`
 says what the app was doing at the time and is the single most useful thing you can
-attach. The **About** page in Settings has a button for it.
+attach. The **About** page in Settings has a button for it. It names the apps that were
+playing sound or using a microphone, so glance through it before posting it publicly.
 
 Found a security problem? Please read [SECURITY.md](SECURITY.md) and report it privately
 rather than opening an issue. It matters more than it looks here: with automatic updates

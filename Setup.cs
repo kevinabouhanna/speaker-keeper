@@ -219,6 +219,14 @@ static class SetupActions
             }
         }
 
+        // A reinstall over a copy that had speaker microphones off keeps them off, and
+        // points the task at this install, which may not be where the last one was.
+        if (Microphones.Enabled)
+        {
+            report("Keeping speaker microphones off...");
+            Microphones.Apply(true, target);
+        }
+
         if (shortcut)
         {
             report("Creating Start Menu shortcut...");

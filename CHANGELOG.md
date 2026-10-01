@@ -21,6 +21,47 @@ Added / Changed / Fixed / Removed / Security
 
 Nothing yet.
 
+## [1.6.0] - 2026-10-01
+
+### Added
+
+- **You can stop apps from using your speaker as a microphone.** Settings → Speakers →
+  *Turn off speaker microphones*. Teams, Discord and game voice chat open a Bluetooth
+  speaker's microphone whenever Windows offers it, and Windows offers it every time the
+  speaker connects. That switches the speaker to call-quality sound, and on some
+  speakers it is why they switch off mid-game. With this on, the speaker is only ever a
+  speaker and your other microphones are used. It stays on after you re-pair the
+  speaker, with nothing for you to redo. Only speakers are affected; earbuds and
+  headsets keep their microphones. Off unless you turn it on, and uninstalling gives
+  every microphone back.
+- **The log now says what your speaker was doing, not just what Speaker Keeper did.**
+  When a speaker switched off, the log could say when but never why, so every report
+  started with guessing. It now records which apps were playing to which speaker and how
+  loudly, every time an app opens a speaker's microphone, the default microphone for
+  calls, and volume changes. It writes a five-minute summary for each speaker, and a
+  line at the moment one disconnects: how long it had been connected, when it last had
+  sound and from what, and whether it was in call mode. It also notes when the display
+  turns off or on and when the PC is locked, so a speaker going quiet at the same moment
+  as the screen is plain to see.
+- **The log keeps more history:** 4 MB and three older files, where it was 1 MB and one.
+
+### Changed
+
+- **The "keeps disconnecting" warning names the real cause when it can.** If a game or
+  voice chat had the speaker's microphone open, it now says so and how to stop it.
+  If the speaker switched off a round number of minutes after its last sound, it says
+  that is the speaker's own timer. Before, it always blamed the Bluetooth connection.
+
+### Fixed
+
+- **A disabled Bluetooth adapter is no longer counted as a second adapter.** It was
+  reported as a "driver problem" and the warning told you to remove it, when switching
+  it off had already dealt with it.
+- **A speaker powering off is no longer logged as `letting it sleep`.** For a moment
+  the speaker's output outlives its Bluetooth device, and that moment read as a
+  decision the app made. It is now counted as the disconnection it is, and every
+  `letting … sleep` line gives a reason.
+
 ## [1.5.1] - 2026-09-22
 
 ### Fixed
@@ -241,7 +282,8 @@ First public release.
 - Follows the default output device when you switch speakers.
 - Per-speaker on/off, a live log viewer, start-with-Windows, and opt-in auto-updates.
 
-[Unreleased]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.5.1...HEAD
+[Unreleased]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.5.1...v1.6.0
 [1.5.1]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.3.2...v1.4.0
