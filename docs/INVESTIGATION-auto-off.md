@@ -242,7 +242,27 @@ ordinary use answers F3 the first time the speaker sits idle while held:
   - Warn when the calls microphone is a speaker Speaker Keeper holds.
   - Stop the drop warning blaming the adapter (F5).
 
-## What the log records now (from the 2026-10-01 build)
+## Where it stands (2026-10-01, after 1.6.0)
+
+- **Released as 1.6.0:** the `Activity` logging below and the *Turn off speaker
+  microphones* setting. On the machine this was found on, the setting has been on
+  since 17:50. Both Xiaomi microphones are off, and Windows' calls microphone is the
+  Anker webcam. A simulated re-pair (node re-enabled, task run) was switched back off
+  by the SYSTEM task within a second.
+- **Open: F3** (does silence keep it on in music mode?). Wait for the next natural drop
+  and read its `disconnected:` line; see *Test 1, next*.
+- **Things that look like bugs and are not:**
+  - *No permission prompt when changing the setting.* This PC has
+    `ConsentPromptBehaviorAdmin = 0` ("elevate without prompting"), so Windows grants
+    admin silently. The change still happens and is logged.
+  - *MIXER RXD lost its microphone too.* It reports Class of Device minor 7 (portable
+    audio), which the setting counts as a loudspeaker. Expected; the setting covers
+    every paired speaker.
+  - *Sound in a "silent" window from `OpenWhispr.exe`* (dictation app) or
+    `powershell.exe` + *Windows sounds* (Claude Code's turn-end chime). Both play
+    through the default output and reset the speaker's timer.
+
+## What the log records now (from 1.6.0)
 
 Before this, the log recorded only what Speaker Keeper did, so every round of this
 investigation started by guessing what the speaker had been doing. `Activity` watches

@@ -19,7 +19,13 @@ Added / Changed / Fixed / Removed / Security
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- **The notes on speakers that switch themselves off are up to date with 1.6.0.**
+  `docs/INVESTIGATION-auto-off.md` now says where things stand and lists what looks like
+  a bug but is not: no permission prompt on PCs set to approve admin requests silently,
+  every paired speaker losing its microphone, and dictation apps or terminal chimes
+  counting as sound.
 
 ## [1.6.0] - 2026-10-01
 
