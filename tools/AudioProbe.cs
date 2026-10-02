@@ -88,6 +88,19 @@ interface IAudioRenderClient
     [PreserveSig] int ReleaseBuffer(uint frames, int flags);
 }
 
+[ComImport, Guid("870AF99C-171D-4F9E-AF0D-E63DF40C2BC9")]
+class PolicyConfigClient { }
+
+[ComImport, Guid("F8679F50-850A-41CF-9C72-430F290290C8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IPolicyConfig
+{
+    [PreserveSig] int GetMixFormat(); [PreserveSig] int GetDeviceFormat(); [PreserveSig] int ResetDeviceFormat();
+    [PreserveSig] int SetDeviceFormat(); [PreserveSig] int GetProcessingPeriod(); [PreserveSig] int SetProcessingPeriod();
+    [PreserveSig] int GetShareMode(); [PreserveSig] int SetShareMode(); [PreserveSig] int GetPropertyValue();
+    [PreserveSig] int SetPropertyValue();
+    [PreserveSig] int SetDefaultEndpoint([MarshalAs(UnmanagedType.LPWStr)] string deviceId, int role);
+}
+
 [ComImport, Guid("C8ADBD64-E71E-48a0-A4DE-185C395CD317"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 interface IAudioCaptureClient
 {
@@ -321,6 +334,7 @@ static class Probe
         if (args.Length >= 1 && args[0] == "watch") return Watch(args.Length > 1 ? args[1] : null);
         if (args.Length >= 3 && args[0] == "play") return Play(args[1], args[2], args.Length > 3 ? int.Parse(args[3]) : 0);
         if (args.Length >= 2 && args[0] == "record") return Record(args[1], args.Length > 2 ? int.Parse(args[2]) : 0);
+        if (args.Length >= 3 && args[0] == "default") return SetDefault(args[1], int.Parse(args[2]));
         Console.WriteLine("usage: AudioProbe watch [logfile] | play <output> <signal> [secs] | record <microphone> [secs]");
         return 2;
     }
@@ -524,6 +538,32 @@ static class Probe
     }
 
     static Guid IID_Capture = new Guid("C8ADBD64-E71E-48a0-A4DE-185C395CD317");
+
+    // ---- default -------------------------------------------------------------
+
+    // Makes an endpoint the default for one role (0 ordinary, 1 multimedia, 2 calls), the
+    // way Windows does when a speaker connects, so Speaker Keeper's reaction can be tested.
+    static int SetDefault(string match, int role)
+    {
+        var en = Audio.NewEnumerator();
+        foreach (int flow in new[] { 0, 1 })
+        {
+            IMMDeviceCollection col; en.EnumAudioEndpoints(flow, 1, out col);
+            uint n; col.GetCount(out n);
+            for (uint i = 0; i < n; i++)
+            {
+                IMMDevice d; col.Item(i, out d);
+                var nm = Audio.Name(d);
+                if (nm.IndexOf(match, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                var pc = (IPolicyConfig)new PolicyConfigClient();
+                int hr = pc.SetDefaultEndpoint(Audio.Id(d), role);
+                Log("default for role " + role + " -> " + nm + (hr == 0 ? "" : " failed 0x" + hr.ToString("X8")));
+                return hr == 0 ? 0 : 1;
+            }
+        }
+        Log("no endpoint matches '" + match + "'");
+        return 1;
+    }
 
     static string Elapsed(DateTime since)
     {

@@ -19,13 +19,47 @@ Added / Changed / Fixed / Removed / Security
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [1.7.0] - 2026-10-02
+
+### Added
+
+- **Meetings and voice chat no longer switch your speaker off.** When Google Meet, Zoom,
+  Teams, Discord or a game opens a speaker's microphone, the speaker drops into call mode,
+  and in call mode it switches itself off about 15 minutes later, whatever is playing.
+  Speaker Keeper's silence cannot reach it there. Windows makes a speaker's microphone
+  the one these apps use every time the speaker connects, so that was happening to anyone
+  with a speaker on their desk. Speaker Keeper now moves that choice straight back to your
+  other microphone, for both Windows' default microphone (what browser meetings use) and
+  its calls microphone (what Teams, Zoom and Discord use). Nothing is disabled: pick the
+  speaker's microphone in an app and you still get it. On for everyone; Settings →
+  Speakers → *Keep speakers out of calls* turns it off.
+- **A notification says so when an app does use your speaker as a microphone anyway**,
+  by name ("Google Chrome is using your speaker as a microphone"), with a click through
+  to the setting that stops it for good.
+
 ### Changed
 
+- **The *Turn off speaker microphones* setting is described as what it now is:** the
+  certain way, for anyone who never wants a speaker used as a microphone, since the new
+  setting already covers the usual case.
+- **The "keeps switching off" warning says it in plain words** rather than "call mode",
+  and points at the setting on the same page.
 - **The notes on speakers that switch themselves off are up to date with 1.6.0.**
   `docs/INVESTIGATION-auto-off.md` now says where things stand and lists what looks like
   a bug but is not: no permission prompt on PCs set to approve admin requests silently,
   every paired speaker losing its microphone, and dictation apps or terminal chimes
   counting as sound.
+
+### Fixed
+
+- **The activity log no longer resets itself when a speaker disconnects.** Windows gives
+  every part of the app the same audio-device handle, and the keep-alive stream was
+  closing it for everyone when it stopped, so the log lost track of every device and
+  then reported speakers that had been connected all along as newly connected. On a PC
+  holding two speakers it could also make the second one's keep-alive fail to start and
+  retry. Both came from the same mistake, now gone.
 
 ## [1.6.0] - 2026-10-01
 
@@ -288,7 +322,8 @@ First public release.
 - Follows the default output device when you switch speakers.
 - Per-speaker on/off, a live log viewer, start-with-Windows, and opt-in auto-updates.
 
-[Unreleased]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.5.1...v1.6.0
 [1.5.1]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/kevinabouhanna/speaker-keeper/compare/v1.4.0...v1.5.0

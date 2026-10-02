@@ -30,12 +30,32 @@ Started 2026-09-22, rewritten 2026-10-01.
 | # | Finding | Status |
 |---|---|---|
 | F1 | The speaker has its own auto-off at **15 minutes**, and it fires while Speaker Keeper is holding a stream | **Confirmed** |
-| F2 | In games, voice chat opens the speaker's microphone, which puts it in **call mode** | **Confirmed** that the mic is the default for calls; that call mode causes the 15-min off is **under test** |
-| F3 | Digital silence in **music mode** keeps the speaker on past 15 minutes | **Under test** (Test 1) |
+| F2 | In games, voice chat opens the speaker's microphone, which puts it in **call mode**, and in call mode the speaker switches off 15 minutes later even with the game audible through it | **Confirmed by elimination** (2026-10-01): two drops match a voice-chat mic switch to the second, and with call mode made impossible there have been no drops while the PC was awake |
+| F3 | Digital silence in **music mode** keeps the speaker on past 15 minutes | **Confirmed** 2026-10-01: 30m55s of nothing but Speaker Keeper's silence (18:49:02 to 19:19:57), no drop. It went only when the PC slept |
 | F4 | The "pair again" prompt is the *other* speaker of the pair, not a lost pairing | **Likely** |
 | F5 | The app's drop warning blames the Bluetooth adapter, wrongly | **Confirmed** |
 | F6 | Holds that lasted hours were times real audio was playing | **Assumed**, never measured |
-| F7 | The display turns off after **15 minutes** idle, the same number. The user suspects the monitor sleeping takes the speaker with it | **Contradicted for most past drops**; display on/off is now logged to settle it |
+| F7 | The display turns off after **15 minutes** idle, the same number. The user suspects the monitor sleeping takes the speaker with it | **Refuted** 2026-10-01: display off 18:25:41 to 18:48:10 (23 min) and 19:04:47 to 19:19:34, speaker on throughout |
+
+> **Conclusion as of 2026-10-01:** Speaker Keeper's silence works. The one way these
+> speakers switch off while the PC is awake is **call mode**: an app holding the
+> speaker's microphone makes Windows suspend the music channel the silence travels on,
+> and nothing an app can send reaches the speaker until the microphone closes. The
+> parked tone ladder is therefore not needed for this speaker. The fix is keeping
+> speakers out of call mode.
+>
+> **Meetings are the same thing** (reported 2026-10-01: off during Google Meet, Zoom,
+> Teams). A meeting opens a microphone exactly as voice chat does. Browser meetings use
+> Windows' *ordinary* default microphone; Teams, Zoom and Discord use the *calls* one.
+>
+> **Decided 2026-10-01: speakers must stay on while the PC is awake, microphone or not.**
+> Since nothing can keep a speaker on once an app holds its microphone, that means
+> keeping it out of call mode by default for everyone, without disabling anybody's
+> hardware: *Keep speakers out of calls* (on by default) moves both microphone roles,
+> and a hands-free output in either output role, off kept-awake loudspeakers, and a
+> notification names any app that picks the speaker's microphone itself. *Turn off
+> speaker microphones* (1.6.0, opt-in) remains the guarantee. Both are tested on the
+> machine this was found on, roles moved within a second; see TECHNICAL.md.
 
 ### F7. The display's 15 minutes
 
@@ -249,8 +269,13 @@ ordinary use answers F3 the first time the speaker sits idle while held:
   since 17:50. Both Xiaomi microphones are off, and Windows' calls microphone is the
   Anker webcam. A simulated re-pair (node re-enabled, task run) was switched back off
   by the SYSTEM task within a second.
-- **Open: F3** (does silence keep it on in music mode?). Wait for the next natural drop
-  and read its `disconnected:` line; see *Test 1, next*.
+- **F3 answered by ordinary use**, as *Test 1, next* hoped: see the findings table.
+- **A 1.6.0 bug, found and fixed:** `activity: sample failed: COM object that has been
+  separated from its underlying RCW`, once after sleep and once on a reconnect. Windows
+  gives every caller in a process the same `MMDeviceEnumerator`, so the CLR gives every
+  caller the same wrapper (`ReferenceEquals` is true), and `Silence` calling
+  `FinalReleaseComObject` on its copy when a stream ended killed `Activity`'s. Both now use
+  `ReleaseComObject`. Verified by ending a stream on purpose: no failure.
 - **Things that look like bugs and are not:**
   - *No permission prompt when changing the setting.* This PC has
     `ConsentPromptBehaviorAdmin = 0` ("elevate without prompting"), so Windows grants
@@ -258,6 +283,8 @@ ordinary use answers F3 the first time the speaker sits idle while held:
   - *MIXER RXD lost its microphone too.* It reports Class of Device minor 7 (portable
     audio), which the setting counts as a loudspeaker. Expected; the setting covers
     every paired speaker.
+  - *A notification "AudioProbe is using your speaker as a microphone"*: that is the
+    bench tool opening the microphone during a test, not a real app.
   - *Sound in a "silent" window from `OpenWhispr.exe`* (dictation app) or
     `powershell.exe` + *Windows sounds* (Claude Code's turn-end chime). Both play
     through the default output and reset the speaker's timer.

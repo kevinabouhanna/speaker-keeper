@@ -22,8 +22,8 @@ using System.Windows.Forms;
 [assembly: AssemblyDescription("Keeps a Bluetooth speaker awake with a silent audio stream")]
 [assembly: AssemblyCompany("Kevin Abou Hanna")]
 [assembly: AssemblyCopyright("Copyright (c) Kevin Abou Hanna")]
-[assembly: AssemblyVersion("1.6.0.0")]
-[assembly: AssemblyFileVersion("1.6.0.0")]
+[assembly: AssemblyVersion("1.7.0.0")]
+[assembly: AssemblyFileVersion("1.7.0.0")]
 
 [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
 class MMDeviceEnumeratorClass { }
@@ -204,6 +204,40 @@ interface IAudioEndpointVolume
     int GetMute(out bool mute);
 }
 
+// Setting a default device. Undocumented, but it is what the Sound control panel itself
+// calls, it has kept this shape since Windows 7, and every tool that switches outputs
+// relies on it. Used only to move Windows' calls microphone off a speaker; see Calls.
+[ComImport, Guid("870AF99C-171D-4F9E-AF0D-E63DF40C2BC9")]
+class PolicyConfigClient { }
+
+[ComImport, Guid("F8679F50-850A-41CF-9C72-430F290290C8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IPolicyConfig
+{
+    // Ten methods this app never calls, declared only to hold their vtable slots.
+    [PreserveSig]
+    int GetMixFormat();
+    [PreserveSig]
+    int GetDeviceFormat();
+    [PreserveSig]
+    int ResetDeviceFormat();
+    [PreserveSig]
+    int SetDeviceFormat();
+    [PreserveSig]
+    int GetProcessingPeriod();
+    [PreserveSig]
+    int SetProcessingPeriod();
+    [PreserveSig]
+    int GetShareMode();
+    [PreserveSig]
+    int SetShareMode();
+    [PreserveSig]
+    int GetPropertyValue();
+    [PreserveSig]
+    int SetPropertyValue();
+    [PreserveSig]
+    int SetDefaultEndpoint([MarshalAs(UnmanagedType.LPWStr)] string deviceId, int role);
+}
+
 [StructLayout(LayoutKind.Sequential)]
 struct DEVPROPKEY
 {
@@ -313,6 +347,18 @@ static class DeviceProps
     {
         var parent = StringProperty(EndpointInstanceId(endpointId), Parent);
         return parent != null && parent.StartsWith("BTH", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// A speaker's call channel: hung off BTHHFENUM, the Hands-Free profile. Its
+    /// microphone always is, and so is the mono call output that some speakers publish
+    /// beside their stereo one. Playing to that output is call mode just as surely as
+    /// opening the microphone.
+    /// </summary>
+    public static bool IsHandsFreeEndpoint(string endpointId)
+    {
+        var parent = StringProperty(EndpointInstanceId(endpointId), Parent);
+        return parent != null && parent.StartsWith("BTHHFENUM", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -815,6 +861,18 @@ static class Settings
     {
         get { return Read("WarnLowBattery", 1) != 0; }
         set { Write("WarnLowBattery", value ? 1 : 0); }
+    }
+
+    /// <summary>
+    /// Move Windows' calls microphone off any speaker this app keeps awake. On unless
+    /// turned off: a speaker in call mode switches itself off, and nothing this app sends
+    /// can reach it there, so keeping it out of call mode is part of keeping it on.
+    /// Per-user and needs no elevation, unlike Microphones, because it disables nothing.
+    /// </summary>
+    public static bool KeepSpeakersOutOfCalls
+    {
+        get { return Read("KeepSpeakersOutOfCalls", 1) != 0; }
+        set { Write("KeepSpeakersOutOfCalls", value ? 1 : 0); }
     }
 
     /// <summary>
@@ -3071,7 +3129,7 @@ class SettingsForm : Form
     readonly StackPage _general, _speakers, _about;
     readonly List<NavItem> _nav = new List<NavItem>();
 
-    readonly ToggleSwitch _runAtLogin, _warnLow, _autoUpdate, _mics;
+    readonly ToggleSwitch _runAtLogin, _warnLow, _autoUpdate, _mics, _outOfCalls;
     readonly NumberStepper _threshold;
     readonly SettingsCard _thresholdCard;
     readonly string _logPath, _dir;
@@ -3149,12 +3207,25 @@ class SettingsForm : Form
                      + "A speaker that is switched off stays here so you can still configure it.";
         _speakers.Controls.Add(devNote);
 
+        _outOfCalls = new ToggleSwitch();
+        _outOfCalls.Toggled += (s, e) =>
+        {
+            if (_loading) return;
+            Settings.KeepSpeakersOutOfCalls = _outOfCalls.On;
+            Raise();
+        };
+        _speakers.Controls.Add(Card(Fluent.IconVolume, "Keep speakers out of calls",
+            "Windows hands a speaker's microphone to meetings, calls and voice chat (Google Meet, "
+            + "Zoom, Teams, Discord, games), which puts the speaker in call mode, where it switches "
+            + "itself off. This moves them to your other microphone. You can still pick a speaker's "
+            + "microphone in an app.", _outOfCalls));
+
         _mics = new ToggleSwitch();
         _mics.Toggled += (s, e) => OnMicrophonesToggled();
         _speakers.Controls.Add(Card(Fluent.IconMicrophone, "Turn off speaker microphones",
-            "Stops Teams, Discord and game voice chat from using a speaker as a microphone, which "
-            + "switches it to call-quality sound. Your other microphones are used instead. Earbuds "
-            + "and headsets keep theirs. Needs administrator approval once.", _mics));
+            "The sure way: no app can use a speaker as a microphone at all, even when picked by "
+            + "hand, so meetings and games can never put it in call mode. Your other microphones "
+            + "are used instead. Earbuds and headsets keep theirs. Needs administrator approval once.", _mics));
 
         _about.Controls.Add(Head("About"));
         var version = Card(Fluent.IconInfo, "Speaker Keeper", "Version " + Project.ShortVersion, null);
@@ -3259,6 +3330,9 @@ class SettingsForm : Form
         _rail.Controls.SetChildIndex(n, 0);
     }
 
+    /// <summary>For a notification about a speaker, which should land on the page that can fix it.</summary>
+    public void ShowSpeakers() { Select(1); }
+
     void Select(int index)
     {
         for (int i = 0; i < _nav.Count; i++)
@@ -3349,9 +3423,9 @@ class SettingsForm : Form
     /// </summary>
     void LoadDevices()
     {
-        // Everything after the heading, the note and the microphone switch is a device row
-        // from last time.
-        for (int i = _speakers.Controls.Count - 1; i >= 3; i--)
+        // Everything after the heading, the note and the two microphone switches is a
+        // device row from last time.
+        for (int i = _speakers.Controls.Count - 1; i >= 4; i--)
         {
             var c = _speakers.Controls[i];
             _speakers.Controls.RemoveAt(i);
@@ -3507,6 +3581,7 @@ class SettingsForm : Form
             _threshold.SetSilently(Settings.LowBatteryThreshold);
             _autoUpdate.SetSilently(Settings.AutoUpdate);
             _mics.SetSilently(Microphones.Enabled);
+            _outOfCalls.SetSilently(Settings.KeepSpeakersOutOfCalls);
             UpdateEnabled();
             if (_speakers.Visible) LoadDevices();
         }
@@ -3887,10 +3962,15 @@ class Silence
         return render.ReleaseBuffer(frames, BufferSilent) == 0;
     }
 
+    // ReleaseComObject, never FinalReleaseComObject. Windows hands every caller in a process
+    // the same device enumerator, so the CLR hands every caller the same wrapper for it,
+    // and a final release here tore the enumerator out from under Activity and from under
+    // any other speaker's stream that was starting at that moment. One release per
+    // reference taken still frees the client and render objects this stream owns alone.
     static void Release(object o)
     {
         if (o == null) return;
-        try { Marshal.FinalReleaseComObject(o); } catch { }
+        try { Marshal.ReleaseComObject(o); } catch { }
     }
 
     void Fail(string why) { Fail(why, 0); }
@@ -4065,11 +4145,10 @@ static class Health
         // remove hardware while the real cause was a microphone being opened by a game.
         var last = Activity.LastDeparture(worst.Container);
         if (last != null && last.InCall)
-            return worst.Name + " has switched off " + times + ", the last time in call mode: "
-                   + last.CallBy + " had its microphone open. Voice chat and calls open the"
-                   + " speaker's microphone when it is Windows' microphone for calls. Choose"
-                   + " another one for calls in Sound settings, or turn off Handsfree Telephony"
-                   + " for the speaker in Devices and Printers, and it stays in music mode.";
+            return worst.Name + " has switched off " + times + ", the last time while "
+                   + last.CallBy + " was using it as a microphone. A speaker used as a microphone"
+                   + " switches itself off after about 15 minutes, whatever is playing. Turn on"
+                   + " Turn off speaker microphones above and no app can do that to it again.";
 
         if (last != null && last.TimerMinutes > 0)
             return worst.Name + " has switched off " + times + ", the last time "
@@ -4156,6 +4235,7 @@ static class Activity
     {
         public string Id, Name;
         public bool Capture, Bluetooth;
+        public bool HandsFree;   // a speaker's call channel: its microphone, or its mono call output
         public Guid Container;
         public IMMDevice Device;
         public IAudioEndpointVolume Volume;
@@ -4271,13 +4351,18 @@ static class Activity
                 // put this in the log every second until it came back.
                 if (DateTime.Now >= quietUntil)
                 {
-                    Program.Log("activity: sample failed: " + ex.Message);
+                    Program.Log("activity: sample failed: " + ex.GetType().Name + ": " + ex.Message + Where(ex));
                     quietUntil = DateTime.Now.AddMinutes(10);
                 }
                 foreach (var e in _eps.Values) Close(e);
                 _eps.Clear();
                 Release(en);
                 en = null;
+
+                // Everything is about to be opened again. Those endpoints did not just
+                // connect, so the next pass must say "present", not "connected", or the
+                // next disconnection would be timed from this reset.
+                first = true;
             }
             Thread.Sleep(SampleMs);
         }
@@ -4330,9 +4415,262 @@ static class Activity
             catch { }   // one endpoint going away mid-read must not cost the others their sample
         }
 
+        // Before Role, so a speaker Windows has just made the calls microphone is moved
+        // back within the second, and the brief assignment never reaches the log as a
+        // settled change. Calls writes its own line saying what it did.
+        Calls(en);
+
         Role(en, 0, 2, "default output for calls", first);
         Role(en, 1, 0, "default microphone", first);
         Role(en, 1, 2, "default microphone for calls", first);
+    }
+
+    // --- keeping speakers out of calls -------------------------------------------------
+    //
+    // A speaker in call mode switches itself off about 15 minutes in, game audible or not,
+    // and nothing this app sends can reach it there: Windows suspends the music channel the
+    // silence travels on for as long as an app holds the microphone (INVESTIGATION F2).
+    // Windows makes a speaker's microphone its calls microphone every time it connects, and
+    // that is what voice chat opens. So the calls role is moved straight back off it.
+    // Nothing is disabled; a user who picks the speaker's microphone in an app still gets
+    // it, and is told what it will do (Notice). Microphones is the stronger, opt-in version.
+
+    // Recent moves per role, so a fight with something that keeps setting the speaker back
+    // (another audio tool, a vendor utility) ends in one log line and a stand-down rather
+    // than two programs flipping the default every second.
+    static readonly Dictionary<int, List<DateTime>> _moves = new Dictionary<int, List<DateTime>>();
+    static readonly Dictionary<int, DateTime> _standDown = new Dictionary<int, DateTime>();
+    static readonly HashSet<string> _nowhere = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    const int MaxMovesPerMinute = 5;
+
+    static void Calls(IMMDeviceEnumerator en)
+    {
+        if (!Settings.KeepSpeakersOutOfCalls) return;
+
+        // Both roles of each. Teams, Discord and games open the calls microphone, but a
+        // browser meeting (Google Meet) opens the ordinary default one, and Windows hands
+        // either to a speaker when it connects.
+        var roles = new[] { new[] { 1, 2 }, new[] { 1, 0 }, new[] { 0, 2 }, new[] { 0, 0 } };
+        var ids = new string[roles.Length];
+        bool any = false;
+        for (int i = 0; i < roles.Length; i++)
+        {
+            ids[i] = DefaultId(en, roles[i][0], roles[i][1]);
+            any |= IsBluetooth(ids[i]);
+        }
+        if (!any) return;   // the ordinary case, decided without a device walk
+
+        var snap = DeviceProps.Read();
+        for (int i = 0; i < roles.Length; i++)
+            if (IsBluetooth(ids[i])) Steer(en, snap, roles[i][0], roles[i][1], ids[i]);
+    }
+
+    static void Steer(IMMDeviceEnumerator en, DeviceProps.Snapshot snap, int flow, int role, string id)
+    {
+        Endpoint e;
+        if (!_eps.TryGetValue(id, out e) || !Guarded(snap, e.Container)) return;
+
+        // For the output only the hands-free channel matters. A speaker's stereo output
+        // being the calls output is harmless: playing to it needs no microphone. Speakers
+        // that publish a separate hands-free output are the ones where voice chat would
+        // otherwise pick that and flip the speaker into call mode just by playing.
+        if (flow == 0 && !IsHandsFreeOutput(snap, id)) return;
+
+        int key = flow * 10 + role;
+        DateTime until;
+        if (_standDown.TryGetValue(key, out until) && DateTime.Now < until) return;
+
+        string what = (role == 2 ? "calls " : "default ") + (flow == 1 ? "microphone" : "output");
+        string target = Replacement(en, snap, flow, role, id, e.Container);
+        if (target == null)
+        {
+            if (_nowhere.Add(id))
+                Program.Log("Windows' " + what + " is " + e.Name + " and there is nothing else to move it"
+                            + " to; voice chat will put that speaker in call mode");
+            return;
+        }
+
+        List<DateTime> moves;
+        if (!_moves.TryGetValue(key, out moves)) _moves[key] = moves = new List<DateTime>();
+        moves.RemoveAll(delegate (DateTime t) { return (DateTime.Now - t).TotalSeconds > 60; });
+        if (moves.Count >= MaxMovesPerMinute)
+        {
+            _standDown[key] = DateTime.Now.AddMinutes(10);
+            moves.Clear();
+            Program.Log("something keeps setting Windows' " + what + " back to " + e.Name
+                        + "; leaving it alone for 10 minutes");
+            return;
+        }
+        moves.Add(DateTime.Now);
+
+        int hr = SetDefault(target, role);
+        string to = DeviceProps.EndpointName(target) ?? target;
+        Program.Log(hr == 0
+            ? "moved Windows' " + what + " from " + e.Name + " to " + to + ", so voice chat cannot put"
+              + " the speaker in call mode (Settings > Speakers > Keep speakers out of calls)"
+            : "could not move Windows' " + what + " off " + e.Name + ": 0x" + hr.ToString("X8"));
+    }
+
+    /// <summary>A loudspeaker this app keeps awake. Earbuds and switched-off speakers are left be.</summary>
+    static bool Guarded(DeviceProps.Snapshot snap, Guid container)
+    {
+        if (container == Guid.Empty) return false;
+        var bt = snap.Of(container);
+        return bt != null && bt.IsLoudspeaker && DevicePolicy.IsEnabled(container, bt.IsSpeaker);
+    }
+
+    static bool IsGuardedEndpoint(DeviceProps.Snapshot snap, string id)
+    {
+        Endpoint e;
+        return id != null && _eps.TryGetValue(id, out e) && e.Bluetooth && Guarded(snap, e.Container);
+    }
+
+    static bool IsHandsFreeOutput(DeviceProps.Snapshot snap, string id)
+    {
+        foreach (var o in snap.Outputs)
+            if (string.Equals(o.EndpointId, id, StringComparison.OrdinalIgnoreCase))
+                return o.Kind == DeviceProps.Channel.HandsFree;
+        return false;
+    }
+
+    /// <summary>
+    /// Where the calls role goes instead. For the microphone, the user's ordinary default
+    /// microphone, which is the one they chose; failing that any other microphone, wired
+    /// ones first. For the output, the ordinary default output, or the same speaker's
+    /// stereo output, which is the speaker without its call mode.
+    /// </summary>
+    static string Replacement(IMMDeviceEnumerator en, DeviceProps.Snapshot snap, int flow, int role, string id, Guid container)
+    {
+        string usual = DefaultId(en, flow, role == 2 ? 0 : 2);
+        if (flow == 1)
+        {
+            if (usual != null && usual != id && !IsGuardedEndpoint(snap, usual)) return usual;
+            string bluetooth = null;
+            foreach (var e in _eps.Values)
+            {
+                if (!e.Capture || e.Id == id || IsGuardedEndpoint(snap, e.Id)) continue;
+                if (!e.Bluetooth) return e.Id;
+                if (bluetooth == null) bluetooth = e.Id;
+            }
+            return bluetooth;
+        }
+
+        if (usual != null && usual != id && !IsHandsFreeOutput(snap, usual)) return usual;
+        foreach (var o in snap.Outputs)
+            if (o.Container == container && o.Kind == DeviceProps.Channel.A2dp) return o.EndpointId;
+        return null;
+    }
+
+    /// <summary>
+    /// The ordinary default (console) moves the multimedia role with it, as the Sound
+    /// control panel does, so the two never disagree about which microphone is "the" one.
+    /// </summary>
+    static int SetDefault(string id, int role)
+    {
+        object o = null;
+        try
+        {
+            o = new PolicyConfigClient();
+            var pc = (IPolicyConfig)o;
+            int hr = pc.SetDefaultEndpoint(id, role);
+            if (hr == 0 && role == 0) pc.SetDefaultEndpoint(id, 1);
+            return hr;
+        }
+        catch (Exception ex) { return Marshal.GetHRForException(ex); }
+        finally { Release(o); }
+    }
+
+    static bool IsBluetooth(string id)
+    {
+        Endpoint e;
+        return id != null && _eps.TryGetValue(id, out e) && e.Bluetooth;
+    }
+
+    static string DefaultId(IMMDeviceEnumerator en, int flow, int role)
+    {
+        IMMDevice d;
+        if (en.GetDefaultAudioEndpoint(flow, role, out d) != 0 || d == null) return null;
+        try
+        {
+            string id;
+            return d.GetId(out id) == 0 ? id : null;
+        }
+        finally { Release(d); }
+    }
+
+    // --- telling the user ----------------------------------------------------------------
+
+    /// <summary>A notification for the tray to show. Built here, shown on the UI thread.</summary>
+    public class Notice { public string Title, Text; }
+
+    static Notice _notice;
+    static readonly Dictionary<Guid, DateTime> _noticed = new Dictionary<Guid, DateTime>();
+
+    /// <summary>Called from the tray's tick, which owns the notification icon.</summary>
+    public static Notice TakeNotice()
+    {
+        lock (_lock)
+        {
+            var n = _notice;
+            _notice = null;
+            return n;
+        }
+    }
+
+    /// <summary>
+    /// An app has opened a kept-awake speaker's microphone anyway, so it is in call mode
+    /// and will switch itself off. Said once per speaker per half hour: a voice channel
+    /// rejoined five times an evening is not five pieces of news.
+    /// </summary>
+    static void NoticeCall(Endpoint mic, string app)
+    {
+        var snap = DeviceProps.Read();
+        if (!Guarded(snap, mic.Container)) return;
+
+        DateTime last;
+        if (_noticed.TryGetValue(mic.Container, out last) && (DateTime.Now - last).TotalMinutes < 30) return;
+        _noticed[mic.Container] = DateTime.Now;
+
+        var bt = snap.Of(mic.Container);
+        string speaker = bt != null && !string.IsNullOrEmpty(bt.Name) ? bt.Name : mic.Name;
+
+        // Plain words, short enough to be read whole. The first version said "call mode",
+        // which means nothing to the person it is for, and ran past what the notification
+        // shows, so the part that said what to do was the part cut off.
+        string title = FriendlyName(app) + " is using your speaker as a microphone";
+        if (title.Length > 63) title = "An app is using your speaker as a microphone";
+
+        lock (_lock)
+            _notice = new Notice
+            {
+                Title = title,
+                Text = speaker + " will switch itself off in about 15 minutes while this lasts."
+                     + " Click to stop apps doing this."
+            };
+    }
+
+    /// <summary>
+    /// What the app calls itself, "Google Chrome" rather than "chrome.exe", from the
+    /// description in its own exe. Falls back to the process name for anything it cannot
+    /// read, such as an elevated process.
+    /// </summary>
+    static string FriendlyName(string process)
+    {
+        string bare = process.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
+            ? process.Substring(0, process.Length - 4) : process;
+        try
+        {
+            foreach (var p in System.Diagnostics.Process.GetProcessesByName(bare))
+                using (p)
+                {
+                    // Trimmed before the check: an exe can carry a description of one space,
+                    // and that made a notification read " is using your speaker".
+                    var d = (p.MainModule.FileVersionInfo.FileDescription ?? "").Trim();
+                    if (d.Length > 0) return d;
+                }
+        }
+        catch { }
+        return bare;
     }
 
     static Endpoint Open(IMMDevice d, string id, bool capture, bool first)
@@ -4345,6 +4683,7 @@ static class Activity
         e.SinceIsConnect = !first;
         e.Name = DeviceProps.EndpointName(id) ?? id;
         e.Bluetooth = DeviceProps.IsBluetoothEndpoint(id);
+        e.HandsFree = DeviceProps.IsHandsFreeEndpoint(id);
         Guid c;
         if (DeviceProps.TryContainer(id, out c)) e.Container = c;
 
@@ -4447,8 +4786,14 @@ static class Activity
             {
                 a.Logged = a.Seen;
                 if (e.Capture) MicChanged(e, kv.Key, a);
-                else Program.Log(kv.Key + (a.Logged ? " playing to " : " stopped playing to ") + e.Name
-                                 + " (" + (a.Logged ? "from " : "at ") + a.Changed.ToString("HH:mm:ss") + ")");
+                else
+                {
+                    bool call = e.HandsFree && e.Bluetooth && e.Container != Guid.Empty;
+                    Program.Log(kv.Key + (a.Logged ? " playing to " : " stopped playing to ") + e.Name
+                                + " (" + (a.Logged ? "from " : "at ") + a.Changed.ToString("HH:mm:ss") + ")"
+                                + (a.Logged && call ? " - that is the speaker's call channel, so it is in call mode" : ""));
+                    if (call) CallChanged(e, kv.Key, a.Logged, a.Changed);
+                }
             }
 
             if (!a.Present && !a.Seen && !a.Logged) e.Apps.Remove(kv.Key);
@@ -4499,30 +4844,43 @@ static class Activity
 
     static void MicChanged(Endpoint e, string app, App a)
     {
-        Call call = null;
-        if (e.Bluetooth && e.Container != Guid.Empty)
-        {
-            if (!_calls.TryGetValue(e.Container, out call) || call.Ended != DateTime.MaxValue)
-            {
-                if (!a.Logged) call = null;
-                else _calls[e.Container] = call = new Call { Since = a.Changed };
-            }
-        }
+        bool speaker = e.Bluetooth && e.Container != Guid.Empty;
+        Program.Log(app + (a.Logged ? " opened the microphone " : " closed the microphone ") + e.Name
+                    + (a.Logged && speaker ? " - that speaker is in call mode for as long as it stays open" : ""));
+        if (speaker) CallChanged(e, app, a.Logged, a.Changed);
+    }
 
-        if (a.Logged)
+    /// <summary>
+    /// An app started or stopped using a speaker's call channel: its microphone, or the
+    /// hands-free output some speakers publish beside their stereo one. Either puts the
+    /// speaker in call mode. An app using both is listed once per channel, so closing the
+    /// microphone while it still plays to the hands-free output does not end the call.
+    /// </summary>
+    static void CallChanged(Endpoint e, string app, bool open, DateTime at)
+    {
+        Call call;
+        bool active = _calls.TryGetValue(e.Container, out call) && call.Ended == DateTime.MaxValue;
+        if (open)
         {
-            if (call != null && !call.By.Contains(app)) call.By.Add(app);
-            Program.Log(app + " opened the microphone " + e.Name
-                        + (call != null ? " - that speaker is in call mode for as long as it stays open" : ""));
+            if (!active) _calls[e.Container] = call = new Call { Since = at };
+            call.By.Add(app);
+            NoticeCall(e, app);
             return;
         }
 
-        Program.Log(app + " closed the microphone " + e.Name);
-        if (call == null) return;
+        if (!active) return;
         call.By.Remove(app);
         if (call.By.Count > 0) return;
         call.Ended = DateTime.Now;
         Program.Log(e.Name + ": back out of call mode after " + Dur(call.Ended - call.Since));
+    }
+
+    /// <summary>Who is holding a call open, each app once.</summary>
+    static string Who(Call c)
+    {
+        var seen = new List<string>();
+        foreach (var a in c.By) if (!seen.Contains(a)) seen.Add(a);
+        return seen.Count > 0 ? string.Join(", ", seen.ToArray()) : c.Was;
     }
 
     /// <summary>The call a speaker is in, or was in until a moment ago.</summary>
@@ -4541,12 +4899,15 @@ static class Activity
         var now = DateTime.Now;
         if (!e.Bluetooth) return;
 
+        // So the next time it connects with nowhere to move its calls role, that is said again.
+        _nowhere.Remove(e.Id);
+
         if (e.Capture)
         {
             Call c;
             if (e.Container != Guid.Empty && _calls.TryGetValue(e.Container, out c) && c.Ended == DateTime.MaxValue)
             {
-                c.Was = string.Join(", ", c.By.ToArray());
+                c.Was = Who(c);
                 c.Ended = now;
                 Program.Log("disconnected: " + e.Name + ", while " + c.Was + " had it open");
             }
@@ -4566,8 +4927,8 @@ static class Activity
         var call = CallOf(e.Container, now);
         if (call != null)
         {
-            string by = call.By.Count > 0 ? string.Join(", ", call.By.ToArray()) : call.Was;
-            parts.Add("in call mode since " + call.Since.ToString("HH:mm:ss") + " (" + by + " had its microphone open)");
+            string by = Who(call);
+            parts.Add("in call mode since " + call.Since.ToString("HH:mm:ss") + " (" + by + " using its call channel)");
             if (e.LastMusicSound != e.LastSound)
                 parts.Add(e.LastMusicSound == DateTime.MinValue
                     ? "no sound in music mode at all"
@@ -4596,7 +4957,7 @@ static class Activity
                 _departures[e.Container] = new Departure
                 {
                     At = now, Name = e.Name, InCall = call != null,
-                    CallBy = call == null ? null : (call.By.Count > 0 ? string.Join(", ", call.By.ToArray()) : call.Was),
+                    CallBy = call == null ? null : Who(call),
                     TimerMinutes = timer
                 };
         }
@@ -4616,7 +4977,7 @@ static class Activity
 
             var call = CallOf(e.Container, now);
             string mode = call != null
-                ? "call mode, " + string.Join(", ", call.By.ToArray()) + " has its microphone"
+                ? "call mode, " + Who(call) + " using its call channel"
                 : "music mode";
 
             Program.Log("activity " + e.Name + ", last " + SummaryMinutes + " min: " + what + "; "
@@ -4745,10 +5106,32 @@ static class Activity
         e.Device = null;
     }
 
+    // One reference at a time, for the reason Silence.Release gives: the enumerator is
+    // shared across the process, and a final release kills it for every other holder.
     static void Release(object o)
     {
         if (o == null) return;
-        try { Marshal.FinalReleaseComObject(o); } catch { }
+        try { Marshal.ReleaseComObject(o); } catch { }
+    }
+
+    /// <summary>
+    /// The method in this class that a failure came out of. A COM error's message says
+    /// what went wrong but never where, and once seen after a resume from sleep that was
+    /// the one thing needed to find it.
+    /// </summary>
+    static string Where(Exception ex)
+    {
+        try
+        {
+            var trace = new System.Diagnostics.StackTrace(ex);
+            for (int i = 0; i < trace.FrameCount; i++)
+            {
+                var m = trace.GetFrame(i).GetMethod();
+                if (m != null && m.DeclaringType == typeof(Activity)) return " (in " + m.Name + ")";
+            }
+        }
+        catch { }
+        return "";
     }
 
     static string Percent(float level) { return Math.Round(level * 100) + "%"; }
@@ -5663,6 +6046,16 @@ static class Program
             else
             {
                 ApplyPolicy();
+            }
+
+            // Activity notices call mode on its own thread; the notification icon belongs
+            // to this one, so the message waits here for the next tick.
+            var notice = Activity.TakeNotice();
+            if (notice != null && _tray != null)
+            {
+                Log("notice: " + notice.Title);
+                _balloonClick = () => { ShowSettings(); if (_settings != null) _settings.ShowSpeakers(); };
+                _tray.ShowBalloonTip(15000, notice.Title, notice.Text, ToolTipIcon.Warning);
             }
 
             // Battery moves slowly and each read walks the device tree, so poll it

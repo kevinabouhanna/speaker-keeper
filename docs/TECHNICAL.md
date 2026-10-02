@@ -237,6 +237,9 @@ each session's `IAudioMeterInformation` peak for how loud, `IAudioEndpointVolume
 | `NAME: format 44100 Hz stereo -> 16000 Hz mono` | The speaker changing profile |
 | `volume NAME: 50% -> 0%` | Bluetooth outputs only, once the slider stops moving |
 | `activity NAME, last 5 min: …` | Every 5 minutes per Bluetooth output: seconds of sound, loudest level, from which apps, music or call mode |
+| `moved Windows' calls microphone from NAME to NAME, …` | Keep speakers out of calls doing its job. Also `default microphone`, and the `output` forms for a hands-free output |
+| `notice: APP is using your speaker as a microphone` | An app picked the speaker's microphone itself; the user was told |
+| `APP playing to NAME (Hands-Free) - that is the speaker's call channel` | Call mode through the hands-free output rather than the microphone |
 | `display off` / `display on` / `display dimmed` | `DisplayWatch`: `RegisterPowerSettingNotification` for `GUID_CONSOLE_DISPLAY_STATE` on a hidden window. The screen sleeping also takes the monitor's HDMI audio output away |
 | `PC locked` / `PC unlocked` | A locked PC turns its display off after one minute, not the usual timeout |
 | `disconnected: NAME after …; last sound …; in call mode since …; … auto-off, not a lost connection` | Written at the moment a Bluetooth output goes: how long it was connected, when it last heard anything and from whom, whether its microphone was open, and whether the gap is a round number of minutes |
@@ -502,6 +505,46 @@ touched, so a failed update leaves a working install:
 > hashes, which means whoever controls the update URL controls what runs as SYSTEM on
 > every install. Treat that host as production infrastructure. Authenticode signing is
 > the next step up if this gets real distribution.
+
+## Keeping speakers out of calls
+
+**Settings → Speakers → Keep speakers out of calls**, on by default
+(`HKCU\Software\SpeakerKeeper\KeepSpeakersOutOfCalls`).
+
+A speaker in **call mode** switches itself off about 15 minutes in, game or meeting
+audible or not, and Speaker Keeper cannot prevent it: while an app holds the speaker's
+microphone (or plays to its hands-free output), Windows suspends the music channel the
+silence travels on. See [INVESTIGATION-auto-off.md](INVESTIGATION-auto-off.md), F2 and F3.
+Keeping the speaker *on* therefore means keeping it *out of call mode*.
+
+Windows hands a speaker's microphone a default role every time the speaker connects:
+the calls role (Teams, Zoom, Discord, game voice chat) and sometimes the ordinary one
+(browser meetings such as Google Meet use it). `Activity.Calls` checks all four roles
+every second and moves any that land on a kept-awake loudspeaker's call channel:
+
+| Role | Moved when it is | Moved to |
+|---|---|---|
+| Microphone, calls and ordinary | the speaker's microphone | the other role's microphone, else any other, wired first |
+| Output, calls and ordinary | the speaker's **hands-free** output | the other role's output, else the speaker's stereo output |
+
+A speaker's stereo output is never moved: playing to it needs no microphone.
+
+- **`IPolicyConfig::SetDefaultEndpoint`** does the move. It is undocumented, but it is
+  what the Sound control panel calls and has kept its shape since Windows 7. Moving the
+  ordinary role moves multimedia with it, as the control panel does.
+- **Only kept-awake loudspeakers**: `IsLoudspeaker` by Class of Device (see below), and
+  not switched off for that speaker. Earbuds and headsets are never touched.
+- **It stands down rather than fights.** Five moves of one role inside a minute means
+  something else keeps setting it back, so it logs once and leaves that role alone for
+  ten minutes.
+- **Nothing is disabled.** An app that picks the speaker's microphone by name still gets
+  it. That is the case left over, so it is reported instead: `Activity.NoticeCall` queues a
+  notification, *"Google Chrome is using your speaker as a microphone"* (the app's own
+  description, from its exe), shown by the tray's tick, at most once per speaker per half
+  hour, with a click through to the Speakers page.
+
+For a user who never wants a speaker used as a microphone at all, the next setting makes
+it impossible.
 
 ## Turning off speaker microphones
 

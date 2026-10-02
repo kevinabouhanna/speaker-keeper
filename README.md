@@ -49,7 +49,7 @@ It sits in your system tray and stays out of the way:
 | 🔋 **Shows your battery**   | One click on the tray icon shows your speaker's charge, and it warns you when it runs low.           |
 | 🎧 **Leaves earbuds alone** | Only works on Bluetooth _speakers_. It won't hold your earbuds awake and drain them.                 |
 | 🔀 **Follows your speaker** | Switch audio output and it follows along automatically.                                              |
-| 🎙️ **Keeps a speaker a speaker** | Optional. Stops Teams, Discord and games from using your speaker as a microphone, which makes it sound like a phone call and can make it switch off. Off unless you turn it on. |
+| 🎙️ **Survives meetings and games** | Google Meet, Zoom, Teams and voice chat grab a speaker's microphone, which makes it sound like a phone call and switch itself off. Speaker Keeper hands them your other microphone instead, and can switch speaker microphones off for good if you prefer. |
 | 🪶 **Tiny**                 | A single small app that follows your Windows theme. No account, no background service, no telemetry. |
 
 ## Install
